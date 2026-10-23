@@ -2,12 +2,16 @@
 // 复用 worker 版；spawn_tasks 用通用版 runAgentInline 跑每个 task turn。
 // 通用版按角色装配注册表（worker 走 createWorkerRegistry —— 闭包绑定了该 worker 的
 // spawn_tasks，嵌套拆分才真正可用；task 走 createRoleRegistry 四件套、无派生能力），
-// 事件不外传（M2 计划决定 #3），只回收 error 事件、done(aborted) 与收尾 summary，
-// 失败标注由调用方按统一 taxonomy 决定（Task 9：`[FAILED] ${agentId}: ${reason}`）。
+// 瞬态事件不外传（M2 计划决定 #3），只回收 error 事件、done(aborted) 与收尾
+// summary，失败标注由调用方按统一 taxonomy 决定（Task 9：`[FAILED] ${agentId}: ${reason}`）。
+// 收尾在 finally 里额外落盘一条 agent_end（durable）：web 右侧面板卡片状态的
+// 完成信号，outcome 与调用方失败taxonomy一致（aborted/error/无 summary 均 failed），
+// runTurn 抛错路径也保证落盘。
 // M4 Task 2：system prompt 按 features.todo 折入该 agent 的 todo 清单段
 // （构建前 foldTodos，关闭开关则不 fold 不出段）；M4 Task 6：skills 段同经
 // features.skills 门控注入（清单来自装配层 discoverSkills 扫描）。
 
+import { randomUUID } from "node:crypto";
 import {
 	featureEnabled,
 	foldTodos,
@@ -54,7 +58,8 @@ export interface InlineTurnOutcome {
 
 // 内联跑完一个下层 agent 的整个 turn：注册表按角色装配（worker 闭包 spawn_tasks），
 // 走自己的档位模型（runtime.resolveModel(tier)），不复用 main 的适配器；
-// 耗尽 runTurn 的异步迭代，事件不外传，只回收失败标注所需的三元组
+// 耗尽 runTurn 的异步迭代，瞬态事件不外传，只回收失败标注所需的三元组，
+// 收尾落盘 agent_end（web 卡片状态数据源）
 export async function runAgentInline(
 	runtime: OrchestrationRuntime,
 	agentId: string,
@@ -103,23 +108,45 @@ export async function runAgentInline(
 	const failures: string[] = [];
 	let aborted = false;
 	let stopReason: string | undefined;
-	for await (const event of runTurn(cfg, signal)) {
-		if (event.type === "error") {
-			failures.push(`${event.error.code}: ${event.error.message}`);
-		}
-		if (event.type === "done") {
-			stopReason = event.stopReason;
-			if (event.stopReason === "aborted") {
-				aborted = true;
+	// try/finally：runTurn 抛错（不止 emits error 事件）时也要保证收尾三件
+	// 事执行完，尤其 agent_end 落盘——它是卡片状态的唯一完成信号，漏掉会让
+	// web 卡片永远停在 running；原异常在 finally 之后照常向上传播
+	let summary: string | undefined;
+	try {
+		for await (const event of runTurn(cfg, signal)) {
+			if (event.type === "error") {
+				failures.push(`${event.error.code}: ${event.error.message}`);
+			}
+			if (event.type === "done") {
+				stopReason = event.stopReason;
+				if (event.stopReason === "aborted") {
+					aborted = true;
+				}
 			}
 		}
+	} finally {
+		// 每个下层 agent 的 turn 收尾触发一次 Stop 钩子（归属该 agent）
+		await runtime.hooks?.run("turn_end", {
+			agent_id: agentId,
+			stop_reason: stopReason ?? "stop",
+		});
+		// best-effort：摘要读取失败（如日志中途损坏）不得阻断下面的 agent_end
+		// 落盘——它是卡片状态的唯一完成信号，summary 缺失按失败 outcome 处理
+		summary = await readAgentSummary(runtime.session.filePath, agentId).catch(
+			() => undefined,
+		);
+		// agent_end：与调用方失败taxonomy对齐（无 summary 也算失败）
+		await runtime.session.append({
+			type: "agent_end",
+			id: randomUUID(),
+			ts: new Date().toISOString(),
+			agentId,
+			outcome:
+				aborted || failures.length > 0 || summary === undefined
+					? "failed"
+					: "done",
+		});
 	}
-	// 每个下层 agent 的 turn 收尾触发一次 Stop 钩子（归属该 agent）
-	await runtime.hooks?.run("turn_end", {
-		agent_id: agentId,
-		stop_reason: stopReason ?? "stop",
-	});
-	const summary = await readAgentSummary(runtime.session.filePath, agentId);
 	return { summary, failures, aborted };
 }
 

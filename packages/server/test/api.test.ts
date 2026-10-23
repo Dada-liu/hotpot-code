@@ -472,7 +472,8 @@ describe("HTTP API", () => {
 		expect(sseQ.events[0]?.seq).toBe(turn1StartSeq);
 
 		// 超大 after（掉出留存窗口）：回退全量日志重放——
-		// 只收 log 事件、覆盖完整历史、id 重新连续
+		// 只收 log 事件、覆盖完整历史、id 重新连续；空闲会话不再补发合成 turn(end)
+		// （agent 状态由 durable 的 agent_end 驱动，纯 main 回合的日志里没有该事件）
 		const sseR = await openSse(fx.base, id, { after: 999999 });
 		await sseR.waitFor(() => sseR.events.filter(isLog).length >= 5, 10000);
 		sseR.close();

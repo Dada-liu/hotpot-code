@@ -162,7 +162,7 @@ describe("runChat", () => {
 		const sessions = await listSessions(home);
 		expect(sessions).toHaveLength(1);
 		const { events } = await loadSession(sessions[0]?.filePath ?? "");
-		// 编排流完整事件链：main(user→spawn_workers→结果) + spawn + worker(user→摘要) + main 收尾
+		// 编排流完整事件链：main(user→spawn_workers→结果) + spawn + worker(user→摘要→agent_end) + main 收尾
 		expect(events.map((e) => e.type)).toEqual([
 			"meta",
 			"user_msg",
@@ -170,6 +170,7 @@ describe("runChat", () => {
 			"agent_spawn",
 			"user_msg",
 			"assistant_msg",
+			"agent_end",
 			"tool_result",
 			"assistant_msg",
 		]);
@@ -399,6 +400,7 @@ describe("runChat", () => {
 			"agent_spawn",
 			"user_msg",
 			"assistant_msg",
+			"agent_end",
 			"tool_result",
 			"assistant_msg",
 		]);

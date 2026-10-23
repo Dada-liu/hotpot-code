@@ -160,7 +160,7 @@ describe("M1 验收（M2 编排流迁移）", () => {
 		expect(report).toBe(REPORT_CONTENT);
 		expect(output.text).toContain(FINAL_ANSWER);
 
-		// 会话文件事件链：meta → main(user→spawn_workers) → spawn → worker(user→bash→result→write→result→摘要)
+		// 会话文件事件链：meta → main(user→spawn_workers) → spawn → worker(user→bash→result→write→result→摘要→agent_end)
 		//   → main(spawn_workers 结果) → main 收尾
 		const sessions = await listSessions(home);
 		expect(sessions).toHaveLength(1);
@@ -176,6 +176,7 @@ describe("M1 验收（M2 编排流迁移）", () => {
 			"assistant_msg",
 			"tool_result",
 			"assistant_msg",
+			"agent_end",
 			"tool_result",
 			"assistant_msg",
 		]);
@@ -296,7 +297,7 @@ describe("M1 验收（M2 编排流迁移）", () => {
 			content: [{ type: "text", text: "这些文件一共多少行？" }],
 		});
 
-		// 会话文件追加完整：场景 A 的 12 事件 + 新一轮 7 事件（main user→spawn_workers→结果 + spawn + worker 摘要 + main 收尾）
+		// 会话文件追加完整：场景 A 的 13 事件 + 新一轮 8 事件（main user→spawn_workers→结果 + spawn + worker 摘要→agent_end + main 收尾）
 		const { events } = await loadSession(sessionPath);
 		expect(events.map((e) => e.type)).toEqual([
 			"meta",
@@ -309,6 +310,7 @@ describe("M1 验收（M2 编排流迁移）", () => {
 			"assistant_msg",
 			"tool_result",
 			"assistant_msg",
+			"agent_end",
 			"tool_result",
 			"assistant_msg",
 			"user_msg",
@@ -316,6 +318,7 @@ describe("M1 验收（M2 编排流迁移）", () => {
 			"agent_spawn",
 			"user_msg",
 			"assistant_msg",
+			"agent_end",
 			"tool_result",
 			"assistant_msg",
 		]);

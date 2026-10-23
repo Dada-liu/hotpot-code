@@ -497,6 +497,49 @@ tests pass
 		expect(second.events.some((e) => e.kind === "delta")).toBe(true);
 	});
 
+	it("空闲会话恢复订阅：agent_end 随日志重放到达，不再补发合成 turn(end)", async () => {
+		await writeSettings("never");
+		const adapter = scriptedAdapter([
+			spawnSimpleRound("读取 note.txt 并总结内容"),
+			toolCallRound("read", "w-tc-1", '{"path":"note.txt"}'),
+			textRound("worker 已读完并总结。", { input: 120, output: 30 }),
+		]);
+		const sm = createSessionManager({ home, llm: { adapter, model: MODEL } });
+		const rec = await sm.create(proj);
+		const first = makeSink();
+		sm.subscribe(rec.id, null, first.sink);
+		await sm.send(rec.id, "看一下 note.txt");
+		await waitFor(() => first.events.some(isTurnEnd));
+		sm.close(rec.id);
+
+		// 新 manager 恢复（web 刷新后重新 attach）：卡片状态由 durable 的
+		// agent_end 随日志重放送达，不再需要合成 turn(end) 兜底
+		const sm2 = createSessionManager({ home });
+		const attached = await sm2.attachById(rec.id);
+		if (attached === null) throw new Error("attachById 未命中");
+		const second = makeSink();
+		await sm2.subscribeResuming(attached.id, null, second.sink);
+		// agent_spawn 与 agent_end 均随重放到达（worker 完成态的数据源），数量对齐
+		const spawns = second.events.filter(
+			(e) => isLog(e) && e.event.type === "agent_spawn",
+		);
+		const ends = second.events.filter(
+			(e) => isLog(e) && e.event.type === "agent_end",
+		);
+		expect(spawns.length).toBeGreaterThan(0);
+		expect(ends.length).toBe(spawns.length);
+		expect(
+			ends.every(
+				(e) =>
+					isLog(e) &&
+					e.event.type === "agent_end" &&
+					e.event.outcome === "done",
+			),
+		).toBe(true);
+		// 空闲会话不再补发合成 turn(end)：瞬态不落盘，缓冲重放里没有 turn 事件
+		expect(second.events.some(isTurnEnd)).toBe(false);
+	});
+
 	it("usage()：折叠 assistant_msg.usage，total/byTier/byAgent 正确", async () => {
 		await writeSettings("never");
 		const adapter = scriptedAdapter([

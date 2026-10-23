@@ -4,6 +4,7 @@
 // M4 新增 todo/set、hook/fired、skill/loaded、prompt/invoked、mcp/attached 五个变体
 // （功能开关/钩子/skill/prompt 模板/MCP 挂载的落盘记录，均不进模型历史，
 // 与 inbox/spliced 同待遇——deriveMessages 不折叠，由各自 fold 纯函数重建状态）。
+// agent_end 为下层 agent turn 收尾事件（web 卡片状态数据源），同样不进模型历史。
 // internal_msg 为编排层内部延续提示（如 plan 起草/批准 kickoff）：deriveMessages 按
 // user 角色折入模型历史，但不属于用户输入，UI 不渲染（与 user_msg 区分）。
 // 文档第 5 节还列了 turn/start|turn/end 与 request_header，M1 暂不需要，未纳入本联合。
@@ -92,6 +93,16 @@ export type SessionEvent =
 			role: string;
 			task: string;
 			tier: ModelTier;
+	  }
+	// agent_end：下层 agent（worker/task）内联 turn 收尾时由编排层落盘（outcome 由
+	// abort/error/无 summary 判定）；web 右侧面板据此翻转卡片状态（failed 不回退），
+	// 与 todo/set 同待遇——不进模型历史，derive 不折叠
+	| {
+			type: "agent_end";
+			id: string;
+			ts: string;
+			agentId: string;
+			outcome: "done" | "failed";
 	  }
 	| {
 			type: "approval/asked";

@@ -12,7 +12,9 @@
 //
 // 事件转发架构规则（计划级决策）：
 // - durable 事件只由 tailer 产出一条路径：迭代器收到的 tool_call/tool_result/
-//   assistant_msg/user_msg 一律不转发（它们由 runTurn 落盘、tailer 推 log）
+//   assistant_msg/user_msg 一律不转发（它们由 runTurn 落盘、tailer 推 log）；
+//   编排层收尾落盘的 agent_end 同样经该 log 路径到达订阅者（web 卡片状态数据源），
+//   客户端无需 turn(end) 兜底翻转 agent
 // - 迭代器只转发瞬态：text→delta、agent_spawn→spawn、plan→plan；done/error 不直发，
 //   收敛为回合收尾的一次 turn(end)（complex 流的起草轮与执行轮各产 done，回合只有一个 end）
 // - 边界同步：delta 前与 turn(end) 前 syncDurable()，保证 log(user_msg) 先于首个 delta、
@@ -910,7 +912,8 @@ export function createSessionManager(
 		): Promise<() => void> {
 			const m = requireManaged(id);
 			if (afterSeq === null) {
-				for (const e of m.hub.buffer()) {
+				const catchUp = m.hub.buffer();
+				for (const e of catchUp) {
 					sink(e);
 				}
 				return registerLive(m, sink);
