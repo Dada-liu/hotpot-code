@@ -19,6 +19,12 @@ export interface InboxSnapshot {
 	nextStep: InboxMessage[];
 }
 
+// todo 工具任务项：todo/set 事件携带全量快照，last-write-wins 折叠
+export interface TodoItem {
+	content: string;
+	status: "pending" | "in_progress" | "completed";
+}
+
 // 会话事件（SessionEvent 联合的镜像子集）
 export type SessionEvent =
 	// meta 是文件首行，无 id/ts
@@ -74,6 +80,14 @@ export type SessionEvent =
 			task: string;
 			tier: string;
 	  }
+	// agent_end：下层 agent turn 收尾落盘；reducer 据此翻转右侧面板卡片状态（failed 不回退）
+	| {
+			type: "agent_end";
+			id: string;
+			ts: string;
+			agentId: string;
+			outcome: "done" | "failed";
+	  }
 	| {
 			type: "approval/asked";
 			id: string;
@@ -103,10 +117,7 @@ export type SessionEvent =
 			id: string;
 			ts: string;
 			agentId: string;
-			todos: {
-				content: string;
-				status: "pending" | "in_progress" | "completed";
-			}[];
+			todos: TodoItem[];
 	  }
 	| {
 			type: "hook/fired";

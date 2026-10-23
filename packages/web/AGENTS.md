@@ -7,5 +7,6 @@
 - LLM-facing prompt text is English; code comments in Simplified Chinese.
 - Plan flow: `internal_msg` is ignored by the reducer; `plan(drafted)` carries `messageIds` for the assistant messages holding the plan text, and the reducer removes them (also suppressing later-arriving logs) so only the plan card is shown.
 - M4: the reducer folds `inbox/spliced` into `state.inbox`; `applyInboxSnapshot` overwrites both queues from `GET /api/sessions/:id/inbox` after consumption. The composer autocompletes prompt templates fetched from `GET /api/sessions/:id/prompts` (sending stays `/name args`; the server expands). Keep `protocol.ts` in sync with the new M4 event variants.
+- Agent panel card status: the done/failed state is driven solely by the durable `agent_end` log event (mirrored in `protocol.ts`), with `log(error)` marking failed immediately and never reverted; `turn(end)` does NOT flip agent status anymore. The `[FAILED]` string heuristic on `tool_result` was removed — failure formats (`[worker-1 failed]` / `[FAILED] task-1:`) are LLM-facing only.
 - Erasable TypeScript only, `.ts`/`.tsx` extension on relative imports, no `any`, no inline imports.
 - Verify with `pnpm test`, `pnpm typecheck`, and `pnpm exec biome check` from the repo root before committing.

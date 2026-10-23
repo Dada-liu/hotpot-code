@@ -1,6 +1,7 @@
 // 根组件：三栏布局（会话列表 | 对话 | agent 面板）与全局状态。
 // 全局状态 = useReducer(reduceChatAction) 折叠 WireEvent 流；切换会话时重置并重建 SSE 连接。
-// 顶栏：会话目录名 + 重连指示 + 右侧面板开关。
+// 顶栏：会话目录名 + 重连指示 + 面板开关（仅 worker 运行期间可见）。
+// agent 面板随 worker 运行自动展示、全部完成即消失，无空态。
 
 import { PanelRight } from "lucide-react";
 import { useCallback, useEffect, useReducer, useState } from "react";
@@ -74,7 +75,7 @@ export function App() {
 	const [approvalBusy, setApprovalBusy] = useState(false);
 	// M4 Feature⑤：当前会话可用的 prompt templates（`/` 补全）
 	const [prompts, setPrompts] = useState<PromptInfo[]>([]);
-	// 面板收起是本地偏好：reducer 的 panelOpen 只负责首个 spawn 时自动展开
+	// 面板收起是本地偏好：worker 运行期间可用顶栏开关展开/收起
 	const [panelCollapsed, setPanelCollapsed] = useState(false);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -370,10 +371,13 @@ export function App() {
 					/>
 				</div>
 				<AgentPanel
+					key={currentId ?? "welcome"}
 					agents={chat.agents}
 					usage={chat.usage}
-					open={chat.panelOpen && !panelCollapsed}
+					open={workerRunning && !panelCollapsed}
 					sessionName={currentName}
+					transcript={chat.transcript}
+					todosByAgent={chat.todosByAgent}
 					onToggle={() => {
 						setPanelCollapsed((v) => !v);
 					}}

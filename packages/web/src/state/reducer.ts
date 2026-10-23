@@ -2,8 +2,9 @@
 // 不依赖 DOM/React，node 下可单测。核心规则：
 // - transcript 只收 main 的 user_msg；assistant_msg 的工具块落成工具卡片，
 //   tool_result 按 toolCallId + agentId 配对回填
-// - agent 树由 spawn / log(agent_spawn) 登记；log(error) 或父级 tool_result
-//   内容含 "[FAILED] <agentId>" 标记 failed；turn(end) 把仍 running 的翻为 done
+// - agent 树由 spawn / log(agent_spawn) 登记；log(agent_end) 把仍 running 的翻为
+//   done/failed（failed 不回退），log(error) 即时标 failed；turn(end) 只做回合级
+//   收敛（turn/pending/流式段），不再触碰 agent 状态
 // - log 事件按 event.id 去重（tailer 重放/断线补发会重复投递）
 // - delta 只累加进当前流式段；assistant_msg 到达后流式段定格（以 content 为准）；
 //   turn(end) 与 log(error) 兜底清理（LLM 失败路径无 assistant_msg 定格）
@@ -13,6 +14,7 @@ import type {
 	InboxMessage,
 	InboxSnapshot,
 	SessionEvent,
+	TodoItem,
 	WireEvent,
 } from "../protocol.ts";
 
@@ -104,13 +106,14 @@ export interface ChatState {
 	pendingApproval: PendingApproval | null;
 	pendingPlan: PendingPlan | null;
 	turn: "idle" | "running";
-	// agent 面板：首个 spawn 到达即展开
-	panelOpen: boolean;
 	// token 用量累计：log(assistant_msg) 时按 tier 分组累加
 	// （含历史重放，幂等去重保证不重复计；tier 默认 "high"，与 core 一致）
 	usage: UsageTotals;
 	// steer/queue 两队列（inbox/spliced 折叠；REST 快照可覆盖修正消费后的残留）
 	inbox: InboxSnapshot;
+	// agent 任务清单：todo/set 全量快照按 agentId 折叠（last-write-wins），
+	// 右侧面板卡片在状态栏下方实时渲染
+	todosByAgent: Record<string, TodoItem[]>;
 	// 作为计划正文落盘的 assistant_msg id：UI 只保留 plan 卡片，不再重复渲染正文气泡
 	hiddenPlanMessageIds: string[];
 	// 已见过的 log 事件 id（幂等去重）
@@ -130,9 +133,9 @@ export function createInitialState(): ChatState {
 		pendingApproval: null,
 		pendingPlan: null,
 		turn: "idle",
-		panelOpen: false,
 		usage: { total: { input: 0, output: 0 }, byTier: {} },
 		inbox: { nextTurn: [], nextStep: [] },
+		todosByAgent: {},
 		hiddenPlanMessageIds: [],
 		seenEventIds: [],
 	};
@@ -262,19 +265,24 @@ export function reduce(state: ChatState, event: WireEvent): ChatState {
 		}
 		case "turn": {
 			if (event.phase === "start") {
-				return { ...state, turn: "running" };
+				// 新任务开始：右侧面板只展示本回合 spawn 的 agent，
+				// 清空上一任务的 agent 树与 todo 清单（turn(start) 不重放，
+				// 重开历史会话时末轮 agent 不受影响的原理与此相同）
+				return {
+					...state,
+					turn: "running",
+					agents: [],
+					todosByAgent: {},
+				};
 			}
-			// 回合结束：仍 running 的翻为 done（failed 不回退），兜底清掉 pending
-			// 与流式段（LLM 失败时无 assistant_msg 定格，turn(end) 是最后收敛点）
+			// 回合结束：兜底清掉 pending 与流式段（LLM 失败时无 assistant_msg
+			// 定格，turn(end) 是最后收敛点）；agent 状态由 agent_end/log(error) 驱动
 			return {
 				...state,
 				turn: "idle",
 				pendingApproval: null,
 				pendingPlan: null,
 				streaming: null,
-				agents: state.agents.map((a) =>
-					a.status === "running" ? { ...a, status: "done" as const } : a,
-				),
 			};
 		}
 		case "plan":
@@ -282,7 +290,6 @@ export function reduce(state: ChatState, event: WireEvent): ChatState {
 		case "spawn":
 			return {
 				...state,
-				panelOpen: true,
 				agents: upsertAgent(state.agents, {
 					agentId: event.agentId,
 					role: event.role,
@@ -409,29 +416,15 @@ function reduceLog(state: ChatState, event: SessionEvent): ChatState {
 					: t,
 			);
 			// 父级工具结束，清除其 currentTool
-			let agents = touchAgent(state.agents, agentId, event.ts, (a) => ({
+			const agents = touchAgent(state.agents, agentId, event.ts, (a) => ({
 				...a,
 				currentTool: undefined,
 			}));
-			// failed 启发：结果内容含 "[FAILED] <agentId>" 时子 agent 标记 failed
-			for (const agent of agents) {
-				if (
-					agent.status !== "failed" &&
-					event.content.includes(`[FAILED] ${agent.agentId}`)
-				) {
-					agents = agents.map((a) =>
-						a.agentId === agent.agentId
-							? { ...a, status: "failed" as const }
-							: a,
-					);
-				}
-			}
 			return { ...state, transcript, agents };
 		}
 		case "agent_spawn":
 			return {
 				...state,
-				panelOpen: true,
 				agents: upsertAgent(state.agents, {
 					agentId: event.agentId,
 					role: event.role === "task" ? "task" : "worker",
@@ -440,6 +433,24 @@ function reduceLog(state: ChatState, event: SessionEvent): ChatState {
 					parentAgentId: event.parentAgentId,
 					lastEventAt: event.ts,
 				}),
+			};
+		case "agent_end":
+			// 下层 agent turn 收尾：只翻转仍 running 的卡片，failed 不回退
+			// （error 可能已先标 failed）；currentTool 随收尾清除
+			return {
+				...state,
+				agents: touchAgent(state.agents, event.agentId, event.ts, (a) =>
+					a.status === "running"
+						? {
+								...a,
+								status:
+									event.outcome === "failed"
+										? ("failed" as const)
+										: ("done" as const),
+								currentTool: undefined,
+							}
+						: a,
+				),
 			};
 		case "approval/asked": {
 			// 审计痕迹：payload.requestId 可关联到对应审批条目；
@@ -479,9 +490,17 @@ function reduceLog(state: ChatState, event: SessionEvent): ChatState {
 						: { ...state.inbox, nextStep: messages },
 			};
 		}
-		// M4 新增事件：与主对话渲染无关（todo/hook/skill/prompt/mcp 由遥测与审计消费），
-		// 幂等去重已在函数入口完成
 		case "todo/set":
+			// todo 工具的全量快照：整体覆盖该 agent 的清单（last-write-wins）
+			return {
+				...state,
+				todosByAgent: {
+					...state.todosByAgent,
+					[event.agentId]: event.todos,
+				},
+			};
+		// M4 新增事件：与主对话渲染无关（hook/skill/prompt/mcp 由遥测与审计消费），
+		// 幂等去重已在函数入口完成
 		case "hook/fired":
 		case "skill/loaded":
 		case "prompt/invoked":

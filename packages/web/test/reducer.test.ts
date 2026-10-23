@@ -1,5 +1,7 @@
-// reducer 测试：spawn 登记 → 工具事件归属 → failed 启发 → turn(end) 状态翻转 →
-// 幂等去重 → delta 折叠定格 → approval 登记/清除 → panelOpen。
+// reducer 测试：spawn 登记 → 工具事件归属 → agent_end/error 状态翻转 →
+// turn(end) 回合级收敛 → 幂等去重 → delta 折叠定格 → approval 登记/清除。
+// 卡片状态规则：log(agent_end) 把仍 running 的翻为 done/failed（failed 不回退），
+// log(error) 即时标 failed；turn(end) 不再触碰 agent 状态。
 // 事件构造走协议形状（protocol.ts 镜像 server wire.ts）。
 
 import { describe, expect, it } from "vitest";
@@ -49,9 +51,8 @@ function assistantUsageMsg(
 }
 
 describe("reduce：spawn 登记与 agent 树", () => {
-	it("spawn 登记 worker 与 task，字段齐全，panelOpen 置 true", () => {
+	it("spawn 登记 worker 与 task，字段齐全", () => {
 		let state = createInitialState();
-		expect(state.panelOpen).toBe(false);
 
 		state = reduce(state, {
 			seq: 1,
@@ -72,7 +73,6 @@ describe("reduce：spawn 登记与 agent 树", () => {
 			parentAgentId: "worker-1",
 		});
 
-		expect(state.panelOpen).toBe(true);
 		expect(state.agents).toHaveLength(2);
 
 		const worker = state.agents.find((a) => a.agentId === "worker-1");
@@ -116,7 +116,102 @@ describe("reduce：spawn 登记与 agent 树", () => {
 			parentAgentId: "main",
 			status: "running",
 		});
-		expect(state.panelOpen).toBe(true);
+	});
+
+	it("todo/set 按 agentId 折叠全量快照（last-write-wins，按 id 幂等）", () => {
+		let state = createInitialState();
+		state = reduce(state, {
+			seq: 1,
+			kind: "spawn",
+			agentId: "worker-1",
+			role: "worker",
+			tier: "low",
+			task: "干活",
+			parentAgentId: "main",
+		});
+		state = reduce(
+			state,
+			log(2, {
+				type: "todo/set",
+				id: "t-1",
+				ts,
+				agentId: "worker-1",
+				todos: [
+					{ content: "读文件", status: "in_progress" },
+					{ content: "写文件", status: "pending" },
+				],
+			}),
+		);
+		expect(state.todosByAgent["worker-1"]).toHaveLength(2);
+		// 新快照整体覆盖
+		state = reduce(
+			state,
+			log(3, {
+				type: "todo/set",
+				id: "t-2",
+				ts,
+				agentId: "worker-1",
+				todos: [
+					{ content: "读文件", status: "completed" },
+					{ content: "写文件", status: "in_progress" },
+				],
+			}),
+		);
+		expect(state.todosByAgent["worker-1"]?.[0]?.status).toBe("completed");
+		// 同 id 重复投递不重复生效
+		state = reduce(
+			state,
+			log(3, {
+				type: "todo/set",
+				id: "t-2",
+				ts,
+				agentId: "worker-1",
+				todos: [{ content: "篡改", status: "pending" }],
+			}),
+		);
+		expect(state.todosByAgent["worker-1"]?.[0]?.content).toBe("读文件");
+	});
+
+	it("turn(start) 清空上一任务的 agent 树与 todo 清单，只保留本回合的", () => {
+		let state = createInitialState();
+		state = reduce(state, {
+			seq: 1,
+			kind: "spawn",
+			agentId: "worker-1",
+			role: "worker",
+			tier: "low",
+			task: "旧任务",
+			parentAgentId: "main",
+		});
+		state = reduce(
+			state,
+			log(2, {
+				type: "todo/set",
+				id: "t-1",
+				ts,
+				agentId: "worker-1",
+				todos: [{ content: "旧 todo", status: "completed" }],
+			}),
+		);
+		expect(state.agents).toHaveLength(1);
+		expect(state.todosByAgent["worker-1"]).toHaveLength(1);
+
+		state = reduce(state, { seq: 3, kind: "turn", phase: "start" });
+		expect(state.agents).toHaveLength(0);
+		expect(state.todosByAgent).toEqual({});
+		expect(state.turn).toBe("running");
+
+		// 新回合 spawn 的 agent 正常登记
+		state = reduce(state, {
+			seq: 4,
+			kind: "spawn",
+			agentId: "worker-2",
+			role: "worker",
+			tier: "medium",
+			task: "新任务",
+			parentAgentId: "main",
+		});
+		expect(state.agents.map((a) => a.agentId)).toEqual(["worker-2"]);
 	});
 });
 
@@ -217,7 +312,7 @@ describe("reduce：工具卡片与 agent 归属", () => {
 	});
 });
 
-describe("reduce：failed 启发", () => {
+describe("reduce：agent 状态翻转（agent_end / error）", () => {
 	it("log(error) 标记对应 agent failed", () => {
 		let state = createInitialState();
 		state = reduce(state, {
@@ -245,7 +340,47 @@ describe("reduce：failed 启发", () => {
 		);
 	});
 
-	it("父级 tool_result 内容含 [FAILED] <agentId> 时子 agent 标记 failed", () => {
+	it("log(agent_end) outcome=done 把 running 翻为 done 并清 currentTool", () => {
+		let state = createInitialState();
+		state = reduce(state, {
+			seq: 1,
+			kind: "spawn",
+			agentId: "worker-1",
+			role: "worker",
+			tier: "medium",
+			task: "干活",
+			parentAgentId: "main",
+		});
+		// assistant_msg 带工具块：currentTool 记为最后一个工具名
+		state = reduce(
+			state,
+			log(
+				2,
+				assistantMsg("a-1", "worker-1", [
+					{ type: "tool_call", id: "c-1", name: "bash", input: {} },
+				]),
+			),
+		);
+		expect(
+			state.agents.find((a) => a.agentId === "worker-1")?.currentTool,
+		).toBe("bash");
+
+		state = reduce(
+			state,
+			log(3, {
+				type: "agent_end",
+				id: "end-1",
+				ts,
+				agentId: "worker-1",
+				outcome: "done",
+			}),
+		);
+		const agent = state.agents.find((a) => a.agentId === "worker-1");
+		expect(agent?.status).toBe("done");
+		expect(agent?.currentTool).toBeUndefined();
+	});
+
+	it("log(agent_end) outcome=failed 把 running 翻为 failed", () => {
 		let state = createInitialState();
 		state = reduce(state, {
 			seq: 1,
@@ -259,24 +394,95 @@ describe("reduce：failed 启发", () => {
 		state = reduce(
 			state,
 			log(2, {
-				type: "tool_result",
-				id: "r-1",
+				type: "agent_end",
+				id: "end-1",
 				ts,
-				agentId: "main",
-				toolCallId: "call-1",
-				content: "[FAILED] task-1: 子任务异常退出",
-				isError: true,
+				agentId: "task-1",
+				outcome: "failed",
 			}),
 		);
 		expect(state.agents.find((a) => a.agentId === "task-1")?.status).toBe(
 			"failed",
 		);
-		expect(state.agents.find((a) => a.agentId === "main")).toBeUndefined();
+	});
+
+	it("log(agent_end) 不回退 failed：error 先标 failed，agent_end(done) 后到仍 failed", () => {
+		let state = createInitialState();
+		state = reduce(state, {
+			seq: 1,
+			kind: "spawn",
+			agentId: "worker-1",
+			role: "worker",
+			tier: "medium",
+			task: "干活",
+			parentAgentId: "main",
+		});
+		state = reduce(
+			state,
+			log(2, {
+				type: "error",
+				id: "err-1",
+				ts,
+				agentId: "worker-1",
+				code: "LLM_ERROR",
+				message: "模型调用失败",
+			}),
+		);
+		state = reduce(
+			state,
+			log(3, {
+				type: "agent_end",
+				id: "end-1",
+				ts,
+				agentId: "worker-1",
+				outcome: "done",
+			}),
+		);
+		expect(state.agents.find((a) => a.agentId === "worker-1")?.status).toBe(
+			"failed",
+		);
+	});
+
+	it("相同 id 的 agent_end 重放幂等（failed 不被重放刷成 done）", () => {
+		let state = createInitialState();
+		state = reduce(state, {
+			seq: 1,
+			kind: "spawn",
+			agentId: "worker-1",
+			role: "worker",
+			tier: "medium",
+			task: "干活",
+			parentAgentId: "main",
+		});
+		state = reduce(
+			state,
+			log(2, {
+				type: "agent_end",
+				id: "end-1",
+				ts,
+				agentId: "worker-1",
+				outcome: "failed",
+			}),
+		);
+		// 重放：不同 seq、同事件 id——入口去重直接丢弃，不会把 failed 重放刷成 done
+		state = reduce(
+			state,
+			log(3, {
+				type: "agent_end",
+				id: "end-1",
+				ts,
+				agentId: "worker-1",
+				outcome: "done",
+			}),
+		);
+		expect(state.agents.find((a) => a.agentId === "worker-1")?.status).toBe(
+			"failed",
+		);
 	});
 });
 
 describe("reduce：turn 状态翻转", () => {
-	it("turn(end) 把仍 running 的 agent 翻为 done；turn(start) 置 running", () => {
+	it("turn(end) 只做回合级收敛，不翻转 agent 状态（状态归 agent_end/error）", () => {
 		let state = createInitialState();
 		expect(state.turn).toBe("idle");
 		state = reduce(state, { seq: 1, kind: "turn", phase: "start" });
@@ -314,12 +520,12 @@ describe("reduce：turn 状态翻转", () => {
 
 		state = reduce(state, { seq: 5, kind: "turn", phase: "end" });
 		expect(state.turn).toBe("idle");
-		// failed 不被翻回 done，running 的翻为 done
+		// failed 保持 failed；仍 running 的也不翻——等各自的 agent_end 翻转
 		expect(state.agents.find((a) => a.agentId === "worker-1")?.status).toBe(
 			"failed",
 		);
 		expect(state.agents.find((a) => a.agentId === "task-2")?.status).toBe(
-			"done",
+			"running",
 		);
 	});
 });

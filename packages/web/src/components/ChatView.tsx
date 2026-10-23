@@ -37,7 +37,9 @@ function textOf(content: ContentBlock[]): string {
 		.join("\n\n");
 }
 
-function TranscriptItem({
+// 单条 transcript 条目渲染：assistant 气泡 / 工具卡片 / 计划卡片 / 审批痕迹 / 错误行。
+// 主对话区与 agent 详情面板共用（详情按 agentId 过滤 transcript 后逐条渲染）
+export function TranscriptItem({
 	entry,
 	pendingPlan,
 	onPlanDecision,
