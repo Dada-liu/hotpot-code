@@ -2,7 +2,9 @@
 
 settings.json 双层加载与功能开关。
 
-- `config.ts` — zod schema（models/features/hooks/webSearch/mcpServers/skillsDirs/promptsDirs/approval/telemetry 等）、`loadSettings({ home, cwd })`、`featureEnabled(features, name)`。
+- `config.ts` — zod schema（models/permission/features/hooks/webSearch/mcpServers/skillsDirs/promptsDirs/telemetry 等）、`loadSettings({ home, cwd })`、`featureEnabled(features, name)`。
+- `permission.mode` 三档（M1，替代旧 `approval.policy`）：`readonly`（read 类自动放行，其余一切 worker 工具逐个经用户审批）/`workspace`（仅危险操作询问，默认档，缺省由调用侧 `?? "workspace"` 应用）/`full`（全部自动放行，链头 `allowAllHandler`，永不打断）。用户级与项目级白名单同名字段。
+- `PermissionMode` 类型从本特性导出（`"readonly" | "workspace" | "full"`）。
 - 用户级 `<home>/settings.json` 必填，含三档模型与凭证；`apiKey` 支持整串 `$ENV` 引用（仅用户级）。
 - 项目级 `.hotpot/settings.json` 自 cwd 向上逐级查找，可选；只覆盖非凭证白名单字段，未知字段静默剥离。
 - home 解析复用 `session/store.ts` 的 `resolveHome`（参数 > `HOTPOT_HOME` > `~/.hotpot`）。

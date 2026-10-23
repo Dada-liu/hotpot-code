@@ -40,7 +40,7 @@ function validSettings(): unknown {
 		mainAgentTier: "medium",
 		maxParallelTasks: 4,
 		planMaxRevisions: 2,
-		approval: { policy: "ask-on-dangerous" },
+		permission: { mode: "workspace" },
 	};
 }
 
@@ -93,7 +93,7 @@ describe("loadSettings", () => {
 		expect(settings.mainAgentTier).toBeUndefined();
 		expect(settings.maxParallelTasks).toBeUndefined();
 		expect(settings.planMaxRevisions).toBeUndefined();
-		expect(settings.approval).toBeUndefined();
+		expect(settings.permission).toBeUndefined();
 	});
 
 	it("缺档位报错：models 少 medium 时抛出含 medium 的错误", async () => {
@@ -163,13 +163,13 @@ describe("loadSettings", () => {
 			mainAgentTier: "high",
 			maxParallelTasks: 8,
 			planMaxRevisions: 5,
-			approval: { policy: "always" },
+			permission: { mode: "readonly" },
 		});
 		const settings = loadSettings({ home, cwd: home });
 		expect(settings.mainAgentTier).toBe("high");
 		expect(settings.maxParallelTasks).toBe(8);
 		expect(settings.planMaxRevisions).toBe(5);
-		expect(settings.approval?.policy).toBe("always");
+		expect(settings.permission?.mode).toBe("readonly");
 		// 凭证与未覆盖字段仍来自用户级
 		expect(settings.models.high.model).toBe("claude-sonnet-4-5");
 	});
@@ -196,6 +196,15 @@ describe("loadSettings", () => {
 		expect(
 			(settings as unknown as Record<string, unknown>).foo,
 		).toBeUndefined();
+	});
+
+	it("permission.mode 非枚举值报错", async () => {
+		const data = validSettings() as {
+			permission: { mode: string };
+		};
+		data.permission.mode = "everything";
+		await writeSettings(data);
+		expect(() => loadSettings({ home, cwd: home })).toThrow(/permission/);
 	});
 
 	it("自 cwd 向上逐级查找，找到项目配置", async () => {

@@ -1,9 +1,9 @@
 // 角色注册表与角色系统提示词测试：
-// - 按角色断言 registry 内工具名集合精确相等（main=仅元工具；worker=四件套+spawn_tasks；task=仅四件套）
+// - 按角色断言 registry 内工具名集合精确相等（main=read+元工具；worker=四件套+spawn_tasks；task=仅四件套）
 // - 断言 buildRoleSystemPrompt 含关键指令短语（main 难度判定、worker 并行拆分、task 原子任务），
 //   且同进程连续构建三种角色 prompt 互不污染（core 的 section 注册表是全局单例，不得泄漏）
 // - M4 矩阵：role × features × runtime 透传字段（mcpTools）的注册表内容；
-//   decorateWorkerTool 只包四件套、feature 外工具裸注册
+//   decorateWorkerTool 只包 worker/task 四件套、feature 外工具裸注册、main 的 read 不装饰
 import type { ToolDeclaration } from "@hotpot/ai";
 import {
 	ApprovalChain,
@@ -30,8 +30,8 @@ function stubMetaTool(name: string): ToolDefinition<unknown> {
 const MAIN_META = [stubMetaTool("spawn_workers")];
 const WORKER_META = [stubMetaTool("spawn_tasks")];
 
-// 最小 runtime 桩：注册表只消费 decorateWorkerTool/features/mcpTools/webSearchBackend，
-// 其余字段原样占位
+// 最小 runtime 桩：注册表只消费 decorateWorkerTool/features/mcpTools/webSearchBackend/
+// permissionMode，其余字段原样占位
 function stubRuntime(
 	overrides?: Partial<
 		Pick<
@@ -50,6 +50,7 @@ function stubRuntime(
 		approval: new ApprovalChain(),
 		maxParallelTasks: 10,
 		planMaxRevisions: 3,
+		permissionMode: { mode: "workspace" },
 		resolveModel: () => {
 			throw new Error("stubRuntime: resolveModel not implemented");
 		},
@@ -75,9 +76,9 @@ function makeCtx(tools: ToolDeclaration[]) {
 }
 
 describe("createRoleRegistry 按角色装配工具集", () => {
-	it("main = 仅元工具，无文件四件套", () => {
+	it("main = 元工具 + read（M1 起唯一的文件工具），无 bash/write/edit", () => {
 		const registry = createRoleRegistry(stubRuntime(), "main", MAIN_META);
-		expect(names(registry)).toEqual(["spawn_workers"]);
+		expect(names(registry)).toEqual(["read", "spawn_workers"]);
 	});
 
 	it("worker = bash/read/write/edit + todo + web_fetch + spawn_tasks", () => {
@@ -134,10 +135,12 @@ describe("buildRoleSystemPrompt 角色指令", () => {
 		// trivial 直接答、complex 在初始轮产出 plan，由系统发起审批
 		expect(prompt).toMatch(/[Aa]nswer directly/);
 		expect(prompt).toMatch(/shows it to the user for approval/);
-		// main 不操作文件：工具清单来自 ctx.tools（spawn_workers），不列文件四件套
+		// main 只有一个文件工具 read：工具清单含 read，不含其余三件套
 		expect(prompt).toContain("spawn_workers");
+		expect(prompt).toContain("- read:");
 		expect(prompt).not.toContain("- bash:");
-		expect(prompt).not.toContain("- read:");
+		expect(prompt).not.toContain("- write:");
+		expect(prompt).not.toContain("- edit:");
 	});
 
 	it("worker 提示词含并行拆分三条件与正反例、spawn_tasks 与结构化摘要要求", () => {
@@ -188,7 +191,7 @@ describe("buildRoleSystemPrompt 角色指令", () => {
 // M4 矩阵：role × features × runtime 透传字段（mcpTools、webSearchBackend）。
 // feature 派生外工具现有 todo（Task 2）、web_fetch（Task 3）、web_search（Task 4）
 // 与 mcpTools（Task 5 样板），矩阵钉死规则：
-// - 外工具只进 worker/task，main 永远只有元工具
+// - 外工具只进 worker/task；main 只有元工具 + read（M1），外工具不进 main
 // - 开关默认（undefined）= 开（featureEnabled `?? true`）；显式 false 才不注册
 // - web_search 尚需 runtime.webSearchBackend 已解析（真实 createRuntime 默认 duckduckgo；
 //   桩 runtime 不注 backend 则不注册，外工具数据默认不报错）
@@ -400,7 +403,7 @@ describe("createRoleRegistry role×feature 矩阵", () => {
 		]);
 	});
 
-	it("main + features 全开 + mcpTools 提供 → 仍只有元工具（外工具不进 main）", () => {
+	it("main + features 全开 + mcpTools 提供 → read + 元工具（外工具不进 main）", () => {
 		const registry = createRoleRegistry(
 			stubRuntime({
 				features: {
@@ -417,21 +420,36 @@ describe("createRoleRegistry role×feature 矩阵", () => {
 			"main",
 			MAIN_META,
 		);
-		expect(names(registry)).toEqual(["spawn_workers"]);
+		expect(names(registry)).toEqual(["read", "spawn_workers"]);
 	});
 
-	it("main + webSearchBackend 提供 → 仍只有元工具（web_search 不进 main）", () => {
+	it("main + webSearchBackend 提供 → 仍只有 read + 元工具（web_search 不进 main）", () => {
 		const registry = createRoleRegistry(
 			stubRuntime({ webSearchBackend: searchBackend }),
 			"main",
 			MAIN_META,
 		);
-		expect(names(registry)).toEqual(["spawn_workers"]);
+		expect(names(registry)).toEqual(["read", "spawn_workers"]);
 	});
 
-	it("main + features 默认 → 同样只有元工具（todo 默认全开也不进 main）", () => {
+	it("main + features 默认 → 同样只有 read + 元工具（todo 默认全开也不进 main）", () => {
 		const registry = createRoleRegistry(stubRuntime(), "main", MAIN_META);
-		expect(names(registry)).toEqual(["spawn_workers"]);
+		expect(names(registry)).toEqual(["read", "spawn_workers"]);
+	});
+
+	it("main 的 read 不套 decorateWorkerTool（装饰只作用于 worker/task 四件套）", () => {
+		const decorated: string[] = [];
+		const decorate = (tool: ToolDefinition<unknown>) => {
+			decorated.push(tool.name);
+			return tool;
+		};
+		const registry = createRoleRegistry(
+			stubRuntime({ decorateWorkerTool: decorate }),
+			"main",
+			MAIN_META,
+		);
+		expect(names(registry)).toEqual(["read", "spawn_workers"]);
+		expect(decorated).toEqual([]);
 	});
 
 	it("decorateWorkerTool 只包四件套：外工具与元工具保持原样", () => {

@@ -68,7 +68,7 @@ Model tier routing:
 - Choose the worker tier inside the spawn_workers call: simple tasks may use medium or low; complex tasks use high.
 - Task agents inherit their worker's tier; you never route them directly.
 
-You do not operate on files yourself — orchestrate via spawn_workers. When execution finishes, collect the worker summaries and reply to the user with a concise result.`;
+You do not modify files yourself — orchestrate modifications via spawn_workers. You have a read tool: use it to inspect files the user references (for example @path mentions or attachments) when their content affects routing or task instructions. When execution finishes, collect the worker summaries and reply to the user with a concise result.`;
 
 // plan 阶段指令：只起草/修订计划，不执行、不调工具。该阶段注册表为空，
 // 避免模型把内部延续提示当成新的用户任务；起草/修订必须保持 # Plan 标记格式，
@@ -83,7 +83,7 @@ export const PLANNING_INSTRUCTIONS = `You are the main agent in the planning pha
 export const EXECUTION_INSTRUCTIONS = `You are the main agent in the execution phase. The user approved the plan.
 
 - Break the approved plan into self-contained worker tasks and call spawn_workers once per execution phase.
-- Do not operate on files yourself and do not re-assess task difficulty.
+- Do not modify files yourself (read-only inspection via the read tool is allowed) and do not re-assess task difficulty.
 - When the workers finish, reply to the user with a concise result summary.`;
 
 // worker 指令：把派发任务执行到底；过大时可按 §4 三条件（无写冲突 / 无顺序依赖 / 各自独立完整）

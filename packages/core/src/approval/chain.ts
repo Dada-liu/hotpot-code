@@ -18,6 +18,11 @@ export type ApprovalHandler = (
 	req: ApprovalRequest,
 ) => Promise<ApprovalDecision | "next">;
 
+// full 权限模式的链头处理器：任何请求直接 allow（永不打断用户）。
+// 只应作为 chain 头部注册——注册后其后的 handler 因短路永远执行不到；
+// 经审计包装层落盘时仍留 approval/asked + approval/decided(approved) 审计对
+export const allowAllHandler: ApprovalHandler = async () => "allow";
+
 export class ApprovalChain {
 	private handlers: ApprovalHandler[] = [];
 

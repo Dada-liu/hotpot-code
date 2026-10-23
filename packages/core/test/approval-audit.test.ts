@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditedApprovalChain } from "../src/approval/audit.ts";
-import { ApprovalChain } from "../src/approval/chain.ts";
+import { ApprovalChain, allowAllHandler } from "../src/approval/chain.ts";
 import type { SessionEvent } from "../src/session/events.ts";
 import { createSession, loadSession } from "../src/session/store.ts";
 
@@ -175,5 +175,55 @@ describe("createAuditedApprovalChain", () => {
 			detail: "ls",
 		});
 		expect(decision).toBe("allow");
+	});
+});
+
+// M1：full 权限模式的链头处理器——任何请求直接 allow，且短路其后注册的 handler
+describe("allowAllHandler", () => {
+	it("作为链头时直接 allow，后续 handler 不会执行", async () => {
+		const chain = new ApprovalChain();
+		chain.use(async () => "allow");
+		let laterRan = false;
+		chain.use(async () => {
+			laterRan = true;
+			return "deny";
+		});
+
+		const decision = await chain.ask({
+			kind: "command",
+			summary: "清理",
+			detail: "rm -rf build/",
+		});
+		expect(decision).toBe("allow");
+		expect(laterRan).toBe(false);
+	});
+
+	it("经审计包装后仍落盘 asked/decided(approved) 审计对", async () => {
+		const session = await createSession("/Users/test/project", home);
+		const inner = new ApprovalChain();
+		inner.use(allowAllHandler);
+		const chain = createAuditedApprovalChain(inner, {
+			session,
+			agentId: "main",
+		});
+
+		const decision = await chain.ask({
+			kind: "write",
+			summary: "覆盖文件",
+			detail: "write note.txt",
+		});
+		expect(decision).toBe("allow");
+
+		const { events } = await loadSession(session.filePath);
+		const approval = approvalEvents(events);
+		expect(approval.map((e) => e.type)).toEqual([
+			"approval/asked",
+			"approval/decided",
+		]);
+		const decided = approval[1];
+		if (decided?.type !== "approval/decided") {
+			throw new Error("expected approval/decided event");
+		}
+		expect(decided.decision).toBe("approved");
 	});
 });

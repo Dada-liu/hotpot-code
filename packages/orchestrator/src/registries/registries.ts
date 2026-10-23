@@ -1,5 +1,6 @@
 // 按角色装配工具注册表，规则钉死（docs/archive/03-agent-orchestration.md §1）：
-// - main：只有编排元工具（首轮与执行阶段均为 spawn_workers），不直接操作文件
+// - main：编排元工具 + read（M1 起唯一的文件工具，不套 decorate/skill 追踪）——
+//   @提及/附件的文件内容由模型自行 read（绝对路径、无目录监禁）
 // - worker：四个基础工具 + 元工具（元工具携带 spawn_tasks，可并行拆分）
 // - task：只有四个基础工具，无派生能力（metaTools 直接忽略）
 // 四件套与 createToolRegistry 复用 core 实现；metaTools 由上层注入，便于测试用桩替换。
@@ -136,6 +137,12 @@ export function createRoleRegistry(
 	metaTools: readonly ToolDefinition<unknown>[],
 ): ToolRegistry {
 	const registry = createToolRegistry();
+	if (role === "main") {
+		// M1：main 的唯一文件工具是 read，裸注册——不套 decorateWorkerTool
+		// （main 不消费权限预审批）也不套 skill 追踪（追踪只面向 worker/task 的
+		// SKILL.md 渐进式加载）。main 仍无 write/edit/bash，写操作只能经 spawn_workers
+		registry.register(readTool);
+	}
 	if (role !== "main") {
 		// worker / task 都有文件四件套；逐个 register 让泛型 T 各自推断，避免数组型变问题。
 		// decorate 只在这里作用于四件套；read 额外包 skill 追踪（任何 policy 下都包，

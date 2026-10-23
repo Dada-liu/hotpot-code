@@ -41,6 +41,7 @@ declare module "node:fs/promises" {
 	): Promise<HotpotDirent[]>;
 	export function appendFile(path: string, data: string): Promise<void>;
 	export function mkdtemp(prefix: string): Promise<string>;
+	export function access(path: string): Promise<void>;
 	export function rm(
 		path: string,
 		options?: { recursive?: boolean; force?: boolean },

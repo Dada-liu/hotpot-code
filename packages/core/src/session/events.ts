@@ -5,12 +5,14 @@
 // （功能开关/钩子/skill/prompt 模板/MCP 挂载的落盘记录，均不进模型历史，
 // 与 inbox/spliced 同待遇——deriveMessages 不折叠，由各自 fold 纯函数重建状态）。
 // agent_end 为下层 agent turn 收尾事件（web 卡片状态数据源），同样不进模型历史。
+// permission/changed 为权限模式切换审计（M1），亦不进模型历史。
 // internal_msg 为编排层内部延续提示（如 plan 起草/批准 kickoff）：deriveMessages 按
 // user 角色折入模型历史，但不属于用户输入，UI 不渲染（与 user_msg 区分）。
 // 文档第 5 节还列了 turn/start|turn/end 与 request_header，M1 暂不需要，未纳入本联合。
 // 契约纪律：只允许新增变体，既有变体字段不改（v1 定稿，未来真需要变更走 v2 迁移）。
 
 import type { ContentBlock, Usage } from "@hotpot/ai";
+import type { PermissionMode } from "../config/config.ts";
 
 // 模型档位：主 agent 固定 high，worker/task 按难度路由（docs/archive/03-agent-orchestration.md 第 8 节）
 export type ModelTier = "high" | "medium" | "low";
@@ -175,6 +177,15 @@ export type SessionEvent =
 			server: string;
 			transport: "stdio" | "http";
 			tools: string[];
+	  }
+	// permission/changed：权限模式切换记录（用户经 UI 改写 runtime 持有者，或 settings 装配初始化），
+	// 仅审计与恢复用——不进模型历史，derive 不折叠，reducer 不渲染（与 agent_end 同待遇）
+	| {
+			type: "permission/changed";
+			id: string;
+			ts: string;
+			mode: PermissionMode;
+			source: "user" | "settings";
 	  }
 	| {
 			type: "error";

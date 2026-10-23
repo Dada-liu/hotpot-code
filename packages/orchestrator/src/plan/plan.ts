@@ -16,6 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
+	createToolRegistry,
 	type LoopConfig,
 	loadSession,
 	type ModelTier,
@@ -27,7 +28,6 @@ import {
 	buildRoleSystemPrompt,
 	PLANNING_INSTRUCTIONS,
 } from "../prompts/prompts.ts";
-import { createRoleRegistry } from "../registries/registries.ts";
 import type { OrchestrationRuntime } from "../runtime/runtime.ts";
 import type { OrchestrationEvent, TurnState } from "../types/types.ts";
 
@@ -183,8 +183,10 @@ export async function* runPlanPhase(
 	signal: AbortSignal,
 	options: PlanPhaseOptions = {},
 ): AsyncIterable<OrchestrationEvent> {
-	// plan 阶段不挂任何工具：起草/修订只用模型能力，spawn_workers 同样不可用
-	const registry = createRoleRegistry(runtime, MAIN_AGENT_ID, []);
+	// plan 阶段刻意挂空注册表：起草/修订只用模型能力——spawn_workers 不可用，
+	// M1 起 main 标配的 read 也不可用（plan 阶段不操作文件，规则见 plan/AGENTS.md）。
+	// 因此不走 createRoleRegistry("main")（它会注册 read），直接建空注册表
+	const registry = createToolRegistry();
 	// 起草轮档位：complex 流固定 high（首轮提示词规定 complex 用 high 档）
 	const tier: ModelTier = "high";
 	const resolved = runtime.resolveModel(tier);

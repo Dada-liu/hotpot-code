@@ -8,8 +8,10 @@
 import { randomUUID } from "node:crypto";
 import type {
 	ApprovalChain,
+	ApprovalHandler,
 	HookChain,
 	ModelTier,
+	PermissionMode,
 	Session,
 	SessionEvent,
 	Settings,
@@ -24,13 +26,71 @@ import {
 import { type ModelResolution, resolveModel } from "../models/models.ts";
 import type { AgentRole } from "../types/types.ts";
 
-// worker/task 注册表工具装饰器：CLI 侧注入 policy 包装（如 approval=always 时
-// 给 bash/write/edit 包一层预审批）的唯一通道 —— 下层注册表由编排层内部装配，
-// 调用方只能经 runtime 闭包把包装带进来；默认原样返回（无装饰）。
+// worker/task 注册表工具装饰器：装配层注入权限包装（createPermissionModeDecorator）
+// 的唯一通道 —— 下层注册表由编排层内部装配，调用方只能经 runtime 闭包把包装带进来；
+// 默认原样返回（无装饰）。
 // 语义钉死（M4 Review Focus）：只包四件套基础工具，feature 派生的外工具不包
 export type WorkerToolDecorator = (
 	tool: ToolDefinition<unknown>,
 ) => ToolDefinition<unknown>;
+
+// 工具入参摘要：input 来自 runTurn 的 JSON.parse，恒为 JSON-safe；防御性 try/catch 兜底
+function summarizeToolInput(input: unknown): string {
+	let text: string;
+	try {
+		text = JSON.stringify(input) ?? "";
+	} catch {
+		text = String(input);
+	}
+	return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+// 权限模式动态分派的 worker 工具装饰器（M1，替代旧 policy=always 的静态包装）：
+// 装配期总是设置，execute 时才读 holder.mode —— readonly 下非 read 工具逐个预审批
+// （旧 always 语义）；workspace/full 原样放行（workspace 靠工具内建危险判定询问，
+// full 靠 createPermissionModeChainHead 动态链头兜底，永不打断）。
+// read 永不包：无副作用，任何模式下都不询问。holder 与 runtime.permissionMode
+// 共享同一对象引用，运行期改写 holder.mode 立即对尚未执行的工具生效
+export function createPermissionModeDecorator(holder: {
+	mode: PermissionMode;
+}): WorkerToolDecorator {
+	return (tool) => {
+		if (tool.name === "read") {
+			return tool;
+		}
+		return {
+			...tool,
+			execute: async (args, ctx) => {
+				if (holder.mode !== "readonly") {
+					return tool.execute(args, ctx);
+				}
+				const decision = await ctx.approval.ask({
+					kind: tool.name === "bash" ? "command" : "write",
+					summary: `Run tool "${tool.name}" (permission mode: readonly)`,
+					detail: summarizeToolInput(args),
+				});
+				if (decision === "deny") {
+					return {
+						content: `tool "${tool.name}" denied by approval`,
+						isError: true,
+					};
+				}
+				return tool.execute(args, ctx);
+			},
+		};
+	};
+}
+
+// 权限模式动态分派的审批链头处理器（M2 修订）：与装饰器一样在 ask 时才读
+// holder.mode —— full 直接放行（运行期从 workspace/readonly 切到 full 立即生效，
+// 永不打断）；其余模式原样委托调用方传入的询问 handler（server 桥 / cli 终端）。
+// 替代旧装配期静态挂 allowAllHandler 的做法（装配后切换 full 不生效的缺口）
+export function createPermissionModeChainHead(
+	holder: { mode: PermissionMode },
+	ask: ApprovalHandler,
+): ApprovalHandler {
+	return async (req) => (holder.mode === "full" ? "allow" : ask(req));
+}
 
 export interface OrchestrationRuntime {
 	readonly session: Session;
@@ -39,6 +99,10 @@ export interface OrchestrationRuntime {
 	readonly maxParallelTasks: number;
 	readonly planMaxRevisions: number;
 	readonly decorateWorkerTool?: WorkerToolDecorator;
+	// M1 权限模式可变持有者：装配时从 settings 初始化（默认 workspace），
+	// 运行期可被 server API 改写（M2 端点）；与装饰器工厂共享引用，
+	// 改写立即对后续工具执行生效
+	permissionMode: { mode: PermissionMode };
 	// —— M4 可选透传（createRuntime 默认空；Task 2-6 逐步消费）——
 	// features：功能开关（读取侧一律经 core 的 featureEnabled `?? true`）
 	readonly features?: Settings["features"];
@@ -70,6 +134,9 @@ export function createRuntime(opts: {
 	maxParallelTasks?: number;
 	planMaxRevisions?: number;
 	decorateWorkerTool?: WorkerToolDecorator;
+	// M1 权限模式持有者：缺省 { mode: "workspace" }；装配层传入时须与
+	// createPermissionModeDecorator 共享同一对象，保证运行期改写对装饰器可见
+	permissionMode?: { mode: PermissionMode };
 	features?: Settings["features"];
 	skills?: Skill[];
 	mcpTools?: readonly ToolDefinition<unknown>[];
@@ -125,6 +192,7 @@ export function createRuntime(opts: {
 		maxParallelTasks: opts.maxParallelTasks ?? 10,
 		planMaxRevisions: opts.planMaxRevisions ?? 3,
 		decorateWorkerTool: opts.decorateWorkerTool,
+		permissionMode: opts.permissionMode ?? { mode: "workspace" },
 		features: opts.features,
 		skills: opts.skills,
 		mcpTools: opts.mcpTools,

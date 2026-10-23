@@ -20,6 +20,12 @@ export interface Inbox {
 	steer(content: string): Promise<void>;
 	// next-step 排队不唤醒
 	inject(content: string): Promise<void>;
+	// 把 next-turn 中指定 id 的消息移入 next-step（web 队列条「转为 steer」）；
+	// 未命中返回 false（调用方转 404），命中则两队列各落一条全量快照
+	steerQueued(id: string): Promise<boolean>;
+	// 移除 next-turn 中指定 id 的排队消息；未命中返回 false（调用方转 404），
+	// 命中则落一条 next-turn 全量快照
+	removeNextTurn(id: string): Promise<boolean>;
 	// 调 opts.onCancel（CLI 侧接 AbortController）
 	cancel(): void;
 	// 取出并清空 next-turn
@@ -71,6 +77,12 @@ export function createInbox(
 		if (!target.some((m) => m.id === message.id)) {
 			target.push(message);
 		}
+		await persistSnapshot(queue);
+	}
+
+	// 落盘指定队列的全量快照：foldInbox 按队列 last-write-wins 恢复，快照必须完整
+	async function persistSnapshot(queue: InboxQueue): Promise<void> {
+		const target = queue === "next-turn" ? state.nextTurn : state.nextStep;
 		await session.append({
 			type: "inbox/spliced",
 			id: randomUUID(),
@@ -94,6 +106,28 @@ export function createInbox(
 		inject(content: string): Promise<void> {
 			return splice("next-step", content);
 		},
+		async steerQueued(id: string): Promise<boolean> {
+			const message = state.nextTurn.find((m) => m.id === id);
+			if (message === undefined) {
+				return false;
+			}
+			state.nextTurn = state.nextTurn.filter((m) => m.id !== id);
+			state.nextStep.push(message);
+			// 两个队列都变了：各落一条全量快照，foldInbox last-write-wins 恢复才不会
+			// 让已移走的消息在 next-turn 里复活
+			await persistSnapshot("next-turn");
+			await persistSnapshot("next-step");
+			return true;
+		},
+		async removeNextTurn(id: string): Promise<boolean> {
+			const message = state.nextTurn.find((m) => m.id === id);
+			if (message === undefined) {
+				return false;
+			}
+			state.nextTurn = state.nextTurn.filter((m) => m.id !== id);
+			await persistSnapshot("next-turn");
+			return true;
+		},
 		cancel(): void {
 			// 不做队列变更：cancel 语义是中断当前 turn（CLI 侧 AbortController），
 			// 已排队的消息是否保留由调用方决定
@@ -101,16 +135,24 @@ export function createInbox(
 		},
 		async drainNextTurn(): Promise<InboxMessage[]> {
 			const drained = state.nextTurn;
+			if (drained.length === 0) {
+				return drained;
+			}
 			state.nextTurn = [];
-			// 刻意不落盘：快照只在显式变更动词时写入。drain 是运行时本地消费，
-			// 持久化快照代表用户意图——崩溃后重新转换应恢复到变更后的队列。
-			// 副作用：已 drain 但尚未处理的消息崩溃后会重现，M2 最小实现可接受。
+			// 消费即落盘：drain 是显式消费点，快照必须反映消费后的空队列。
+			// 否则崩溃恢复/会话重开会把已执行的消息复活到队列里，下一个回合结束时
+			// 再次被执行（重复执行比极小窗口内的消息丢失更严重）
+			await persistSnapshot("next-turn");
 			return drained;
 		},
 		async pollNextStep(): Promise<string[]> {
 			const drained = state.nextStep;
+			if (drained.length === 0) {
+				return [];
+			}
 			state.nextStep = [];
-			// 不落盘，理由同 drainNextTurn
+			// 消费即落盘，理由同 drainNextTurn
+			await persistSnapshot("next-step");
 			return drained.map((m) => m.content);
 		},
 		// 快照返回拷贝：调用方（REST/UI）不得改写内部队列

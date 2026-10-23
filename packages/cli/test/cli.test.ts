@@ -5,7 +5,7 @@
 // 审批询问仍走终端 handler（在 worker 工具执行内触发），交互断言不变。
 // 脚本化适配器按全局 streamChat 调用序回放：1=main 首轮步，2..N=worker 各步，末位=main 收尾。
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -231,19 +231,18 @@ describe("runChat", () => {
 		expect(decided).toMatchObject({ decision: "denied" });
 	});
 
-	it("approval policy=never：不询问，危险操作 fail-closed 直接 deny", async () => {
+	it("permission mode=full：危险命令也不询问，自动放行真实执行", async () => {
 		const settings: Settings = {
 			...SETTINGS,
-			approval: { policy: "never" },
+			permission: { mode: "full" },
 		};
+		// 真实存在的目标目录：full 模式下 rm -rf 会被真实执行，用目录消失作证
+		const target = join(home, "full-mode-target");
+		await mkdir(target);
 		const script: StreamEvent[][] = [
 			spawnWorkersRound("清理临时目录"),
-			toolCallRound(
-				"tc-1",
-				"bash",
-				'{"command":"rm -rf /tmp/hotpot-cli-test-target"}',
-			),
-			textRound("已跳过危险操作"),
+			toolCallRound("tc-1", "bash", `{"command":"rm -rf ${target}"}`),
+			textRound("清理完毕"),
 			textRound("收到"),
 		];
 		// 输入队列不含审批回答：若仍发起终端询问会消费掉 /exit 导致用例失败
@@ -259,30 +258,32 @@ describe("runChat", () => {
 		});
 
 		expect(output.text).not.toContain("[approval]");
-		expect(output.text).toContain("已跳过危险操作");
+		expect(output.text).toContain("清理完毕");
+		// 目录真的被删掉：full 模式危险命令直接放行执行
+		await expect(access(target)).rejects.toThrow();
 		const sessions = await listSessions(home);
 		const { events } = await loadSession(sessions[0]?.filePath ?? "");
-		// fail-closed deny 照样落盘（无终端 handler，asked/decided 仍经审计包装写日志）
-		const denied = events.find(
+		const executed = events.find(
 			(e): e is Extract<SessionEvent, { type: "tool_result" }> =>
 				e.type === "tool_result" &&
 				e.agentId === "worker-1" &&
-				e.isError === true &&
-				e.content.includes("denied"),
+				e.isError !== true,
 		);
-		expect(denied).toBeDefined();
+		expect(executed).toBeDefined();
+		// 审计不缺席：bash 内建危险判定仍走链，链头 allowAllHandler 落盘 asked/decided(approved)
+		expect(events.filter((e) => e.type === "approval/asked")).toHaveLength(1);
 		const decided = events.find((e) => e.type === "approval/decided");
-		expect(decided).toMatchObject({ decision: "denied" });
+		expect(decided).toMatchObject({ decision: "approved" });
 	});
 
-	it("approval policy=always：安全命令也先询问，回答 y 放行执行", async () => {
+	it("permission mode=readonly：安全命令也先询问，回答 y 放行执行", async () => {
 		const settings: Settings = {
 			...SETTINGS,
-			approval: { policy: "always" },
+			permission: { mode: "readonly" },
 		};
 		const script: StreamEvent[][] = [
 			spawnWorkersRound("打个招呼"),
-			toolCallRound("tc-1", "bash", '{"command":"echo policy-always-ok"}'),
+			toolCallRound("tc-1", "bash", '{"command":"echo readonly-mode-ok"}'),
 			textRound("执行完毕"),
 			textRound("已完成"),
 		];
@@ -297,7 +298,7 @@ describe("runChat", () => {
 			output,
 		});
 
-		// echo 不是危险命令，ask-on-dangerous 下不会询问；always 下询问并放行
+		// echo 不是危险命令，workspace 下不会询问；readonly 下逐个预审批并放行
 		expect(output.text).toContain("[approval]");
 		expect(output.text).toContain("已允许");
 		expect(output.text).toContain("执行完毕");
@@ -309,15 +310,15 @@ describe("runChat", () => {
 				e.type === "tool_result" &&
 				e.agentId === "worker-1" &&
 				e.isError !== true &&
-				e.content.includes("policy-always-ok"),
+				e.content.includes("readonly-mode-ok"),
 		);
 		expect(echoed).toBeDefined();
 	});
 
-	it("approval policy=always：read 无副作用不询问，结果正常返回", async () => {
+	it("permission mode=readonly：read 无副作用不询问，结果正常返回", async () => {
 		const settings: Settings = {
 			...SETTINGS,
-			approval: { policy: "always" },
+			permission: { mode: "readonly" },
 		};
 		await writeFile(join(home, "note.txt"), "hello hotpot\n");
 		const script: StreamEvent[][] = [

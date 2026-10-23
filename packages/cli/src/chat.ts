@@ -23,17 +23,19 @@ import {
 	isSlashInput,
 	loadSettings,
 	type ModelTier,
+	type PermissionMode,
 	resolveHome,
 	resolveSlashCommand,
 	resumeSession,
 	type Session,
 	type Settings,
-	type ToolDefinition,
 } from "@hotpot/core";
 import {
 	closeMcpConnections,
 	connectMcpServers,
 	createInbox,
+	createPermissionModeChainHead,
+	createPermissionModeDecorator,
 	createRuntime,
 	type McpConnection,
 	type OrchestrationEvent,
@@ -77,35 +79,6 @@ export interface RunChatOptions {
 	warn?: (text: string) => void;
 	// 测试注入点：遥测上报用的 fetch，默认走全局 fetch
 	telemetryFetch?: typeof fetch;
-}
-
-type ApprovalPolicy = "ask-on-dangerous" | "always" | "never";
-
-// policy=always 时给有副作用的工具包一层审批：execute 前先过 ApprovalChain，deny 直接返回 isError。
-// M2 下这套包装经 runtime.decorateWorkerTool 注入，套在 worker/task 注册表的四件赛上
-// （policy=ask-on-dangerous 时只有工具内建的危险判定会发起审批，见 bashTool/writeTool）
-// ApprovalRequest.kind 只有 command/write 两种，按工具副作用类型映射
-function withApproval<T>(
-	tool: ToolDefinition<T>,
-	kind: "command" | "write",
-): ToolDefinition<T> {
-	return {
-		...tool,
-		execute: async (args, ctx) => {
-			const decision = await ctx.approval.ask({
-				kind,
-				summary: `Run tool "${tool.name}" (approval policy: always)`,
-				detail: summarizeInput(args),
-			});
-			if (decision === "deny") {
-				return {
-					content: `tool "${tool.name}" denied by approval`,
-					isError: true,
-				};
-			}
-			return tool.execute(args, ctx);
-		},
-	};
 }
 
 function truncate(text: string, max: number): string {
@@ -262,28 +235,28 @@ export async function runChat(opts: RunChatOptions): Promise<void> {
 	// 审批装配：终端 handler 挂内层链，整体经 createAuditedApprovalChain 落盘 asked/decided。
 	// 审计包装的 agentId 在装配期固定为 "main"：ApprovalChain.ask 不带 agentId，
 	// worker 发起的 command/write 询问也记在同一 id 下（core 包装层的既有契约）。
-	// never：不注册任何 handler，ApprovalChain fail-closed 全部 deny（不打扰用户，也不放行）
-	const policy: ApprovalPolicy =
-		settings.approval?.policy ?? "ask-on-dangerous";
+	// full 模式链头由 createPermissionModeChainHead 动态裁决（执行时读 holder：
+	// full 任何询问直接放行，永不打断用户；其余模式委托终端 handler）。默认 workspace
+	const mode: PermissionMode = settings.permission?.mode ?? "workspace";
+	const permissionHolder: { mode: PermissionMode } = { mode };
 	const baseApproval = new ApprovalChain();
-	if (policy !== "never") {
-		baseApproval.use(createTerminalApproval(input, output));
-	}
+	baseApproval.use(
+		createPermissionModeChainHead(
+			permissionHolder,
+			createTerminalApproval(input, output),
+		),
+	);
 	const approval = createAuditedApprovalChain(baseApproval, {
 		session,
 		agentId: "main",
 	});
 
-	// policy=always：worker/task 的 bash/write/edit 包一层预审批。
-	// read 无副作用（isConcurrencySafe），与 M1 一致任何 policy 下都不包、不询问。
+	// decorateWorkerTool 总是设置：包装在 execute 时读 holder.mode 动态分派——
+	// readonly 下 worker/task 的 bash/write/edit 逐个预审批；workspace/full 原样放行。
+	// read 无副作用（isConcurrencySafe），任何模式下都不包、不询问。
 	// 下层注册表由编排层内部装配，包装只能经 runtime.decorateWorkerTool 闭包带进去
-	const decorateWorkerTool: WorkerToolDecorator | undefined =
-		policy === "always"
-			? (tool) =>
-					tool.name === "read"
-						? tool
-						: withApproval(tool, tool.name === "bash" ? "command" : "write")
-			: undefined;
+	const decorateWorkerTool: WorkerToolDecorator =
+		createPermissionModeDecorator(permissionHolder);
 
 	// M4 Feature④ skill：开关（features.skills，默认开）打开时扫描
 	// skillsDirs（相对 cwd 解析）→ <home>/skills → <cwd>/.hotpot/skills。
@@ -328,6 +301,7 @@ export async function runChat(opts: RunChatOptions): Promise<void> {
 		maxParallelTasks: settings.maxParallelTasks,
 		planMaxRevisions: settings.planMaxRevisions,
 		decorateWorkerTool,
+		permissionMode: permissionHolder,
 		features: settings.features,
 		skills,
 		mcpTools: mcpConnections.flatMap((c) => c.tools),
