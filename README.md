@@ -99,6 +99,8 @@ M3 已完成：Web 端交付——`packages/server`（REST + SSE，默认 4573 �
 
 M5 已完成（本仓库部分）：`packages/telemetry` 匿名遥测客户端（cli/server 接入、事件白名单、脱敏、批量重试）+ `benchmarks/` benchmark runner（SWE-bench 实例导出/选择、普通 checkout + worktree、无交互 agent、predictions、官方 `swebench` harness 编排、报告、`benchmark_run` 遥测、自建题三类）。用法见 `benchmarks/README.md`；自建题沉淀流程见 `docs/benchmark-authoring.md`；Lite 10 题验收记录见 `docs/archive/04-roadmap.md` M5 节。遥测后台是仓库外独立项目 `../hotpot-telemetry/`，不进入工具产物。
 
+M6 已完成：Web 端交互完善——运行中发送默认进入 next-turn 队列（QueueBar 固定在输入框上方；点击条目转 steer 注入、✕ 移除，消费即落盘，重开不会重复执行）；新建会话可指定工作区 cwd，会话行展示 cwd；权限三档（只读/工作区修改/完全权限，按审批策略实现，composer 内实时切换并持久化）；composer 支持 `/` 内置指令（`/help`、`/permission`）与 prompt 模板、➕ 文本附件上传、`@` 工作区文件提及（main agent 新增 read 工具按引用读取）。
+
 运行方式：
 
 1. 配置 `~/.hotpot/settings.json`（三档模型必填；`apiKey` 可写字面值，或 `"$VAR"` 引用环境变量）：
@@ -118,7 +120,7 @@ M5 已完成（本仓库部分）：`packages/telemetry` 匿名遥测客户端�
    }
    ```
 
-   内置目录模型的协议自动选择（anthropic→anthropic-messages，其余→openai-completions）；`baseUrl` 可省略，默认走各家官方端点（openai 系默认 `https://api.openai.com/v1`，deepseek/moonshot 等第三方端点需显式填写）。项目级可在 cwd 向上任一目录放 `.hotpot/settings.json` 覆盖非凭证白名单字段（`mainAgentTier`/`maxParallelTasks`/`planMaxRevisions`/`approval.policy`），凭证只从用户级读取。
+   内置目录模型的协议自动选择（anthropic→anthropic-messages，其余→openai-completions）；`baseUrl` 可省略，默认走各家官方端点（openai 系默认 `https://api.openai.com/v1`，deepseek/moonshot 等第三方端点需显式填写）。项目级可在 cwd 向上任一目录放 `.hotpot/settings.json` 覆盖非凭证白名单字段（`mainAgentTier`/`maxParallelTasks`/`planMaxRevisions`/`permission.mode`），凭证只从用户级读取。
 
 2. 命令行入口为 `hotpot`（安装后直接可用；源码仓库开发态：`pnpm dev cli chat`），启动行式对话：`/exit` 退出，Ctrl-C 中断当前回合；高危命令与覆盖写会询问 `y/n` 审批（默认 n）。
 3. 会话以 JSONL 落盘在 `~/.hotpot/sessions/`；`hotpot chat --session <会话文件路径>` 恢复历史继续对话（源码仓库开发态：`pnpm dev cli chat --session <会话文件路径>`）。
@@ -145,5 +147,5 @@ M5 已完成（本仓库部分）：`packages/telemetry` 匿名遥测客户端�
 
 ## 已知问题（TODO）
 
-- **掉窗全量重连后 composer 的回合状态无法重建**：`turn(start/end)` 是瞬态 wire 事件不落盘，掉窗全量重放（`loadSession` 路径，见 `packages/server/src/session-manager.ts` 的 `subscribeResuming`）只重放 durable 日志。后果有二：① 繁忙会话（事件超出 hub 2000 条留存窗口）运行中刷新页面，客户端 `turn` 停在初始 `idle`——composer 显示普通发送模式，无法取消当前回合、输入也不会走 steer 注入；② 断线错过 `turn(end)` 且掉出窗口后，客户端 `turn` 卡在 `running`——composer 锁在 steer/取消模式，回车变成给已结束的回合注入。修复方向：订阅对账时以 `holder.running` 为权威，向本订阅者 `hub.replay` 合成缺失的 `turn(start/end)`（sink-only，模式 B，参考已移除的旧合成 `turn(end)` 机制）。关联缺口：plan 审批等待态同样依赖瞬态 `plan`/`approval` 事件，掉窗重连后审批入口不恢复（服务端 parked promise 仍在等待）。待排期修复。
+- **掉窗全量重连后 composer 的回合状态无法重建**：`turn(start/end)` 是瞬态 wire 事件不落盘，掉窗全量重放（`loadSession` 路径，见 `packages/server/src/session-manager.ts` 的 `subscribeResuming`）只重放 durable 日志。后果：① 繁忙会话（事件超出 hub 2000 条留存窗口）运行中刷新页面，客户端 `turn` 停在初始 `idle`——composer 显示普通发送模式，没有队列条与取消按钮；服务端仍以 `holder.running` 为准把发送排入 next-turn（不会误跑新回合），但排队消息在下次快照刷新前不可见、也无法取消；② 断线错过 `turn(end)` 且掉出窗口后，客户端 `turn` 卡在 `running`——composer 显示排队提示与取消按钮，而服务端实际空闲，发送会正常开启新回合（取消按钮为无效展示）。修复方向：订阅对账时以 `holder.running` 为权威，向本订阅者 `hub.replay` 合成缺失的 `turn(start/end)`（sink-only，模式 B，参考已移除的旧合成 `turn(end)` 机制）。关联缺口：plan 审批等待态同样依赖瞬态 `plan`/`approval` 事件，掉窗重连后审批入口不恢复（服务端 parked promise 仍在等待）。待排期修复。
 

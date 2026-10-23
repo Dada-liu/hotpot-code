@@ -2,7 +2,7 @@
 // 与 CLI 共用 core/orchestrator 的装配，但刻意收紧：
 // - 临时 HOTPOT_HOME（mkdtemp），不污染用户会话与 telemetry 安装 ID；
 // - 显式 allow-all 工具审批（经 audited 包装落盘 asked/decided），plan 自动批准；
-//   不用 approval.policy = "never"：那等于没有 handler，审批会被 fail-closed 拒绝；
+//   不用 permission.mode 门控（基准场景要求零打断，显式链头放行语义更直接）；
 // - 关闭 todo/hooks/skills/promptTemplates/web/mcp，只留 bash/read/write/edit 等基础工具；
 // - maxParallelTasks=1，benchmark 不做并行拆分压测；
 // - 只回传 outcome、整棵树的 token、时长与会话路径，不把对话内容带回上层。
