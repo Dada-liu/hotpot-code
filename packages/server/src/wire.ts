@@ -3,10 +3,12 @@
 // - log：durable 会话事件，只由 tailer 路径产出（客户端按 event.id 去重）
 // - delta：主流式文本增量（仅 server 驱动回合时产出，agentId 固定 "main"）
 // - turn/plan/spawn/approval：瞬态事件，来自 turn 迭代器与审批桥
+// - permission：权限模式切换瞬态（M2，PUT /permission 与 /permission 内置指令），
+//   落在 durable 的 permission/changed 之后到达（边界同步同 plan 事件）
 // createWireHub 是会话内的事件总线：emit 分配 seq 并留存 ring buffer；
 // 订阅方重放走 buffer()，断线重连增量走 tailAfter()。
 
-import type { SessionEvent } from "@hotpot/core";
+import type { PermissionMode, SessionEvent } from "@hotpot/core";
 
 export type WireEvent =
 	| { seq: number; kind: "log"; event: SessionEvent }
@@ -43,6 +45,11 @@ export type WireEvent =
 			summary: string;
 			detail?: string;
 			plan?: string;
+	  }
+	| {
+			seq: number;
+			kind: "permission";
+			mode: PermissionMode;
 	  };
 
 // emit 入参：协议事件去掉 seq（seq 由 hub 在 emit 时刻分配）

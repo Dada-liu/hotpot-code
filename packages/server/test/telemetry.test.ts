@@ -56,7 +56,7 @@ async function writeSettings(telemetry?: Settings["telemetry"]): Promise<void> {
 			medium: { provider: "test-provider", model: "test-medium", apiKey: "mk" },
 			low: { provider: "test-provider", model: "test-low", apiKey: "lk" },
 		},
-		approval: { policy: "never" },
+		permission: { mode: "full" },
 		...(telemetry === undefined ? {} : { telemetry }),
 	};
 	await writeFile(

@@ -10,10 +10,12 @@
 //   live 通道就绪，彻底排除「连接已通、订阅未注册」的竞态
 // - sink 自包 try/catch：manager 的 emit 是同步广播，sink 抛错会杀死广播循环
 
+import { stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { SessionManager } from "./session-manager.ts";
-import { PromptCommandError } from "./session-manager.ts";
+import { PromptCommandError, SessionApiError } from "./session-manager.ts";
 import {
 	putModelSettingsSchema,
 	readModelSettings,
@@ -33,6 +35,15 @@ const approvalSchema = z.object({
 const planSchema = z.object({
 	decision: z.enum(["approve", "reject", "annotate"]),
 	note: z.string().optional(),
+});
+// M2 权限切换：mode 三档枚举，非法值由 zod 拦 400
+const putPermissionSchema = z.object({
+	mode: z.enum(["readonly", "workspace", "full"]),
+});
+// M2 文本附件上传：name 由 manager 净化（剥路径分隔符与 ..），content 纯文本
+const uploadSchema = z.object({
+	name: z.string(),
+	content: z.string(),
 });
 
 // 读取 JSON body：空 body 视为 {}；非法 JSON 返回 undefined（调用方转 400）
@@ -162,7 +173,19 @@ export function createApp(
 		if (!parsed.success) {
 			return c.json({ error: "body 需为 {cwd?: string}" }, 400);
 		}
-		const rec = await manager.create(parsed.data.cwd ?? process.cwd());
+		// M2：显式 cwd 须 resolve 后存在且为目录，否则 400（缺省仍用 process.cwd()）
+		let cwd = parsed.data.cwd ?? process.cwd();
+		if (parsed.data.cwd !== undefined) {
+			cwd = resolve(parsed.data.cwd);
+			try {
+				if (!(await stat(cwd)).isDirectory()) {
+					return c.json({ error: `cwd 不是目录: ${cwd}` }, 400);
+				}
+			} catch {
+				return c.json({ error: `cwd 不存在: ${cwd}` }, 400);
+			}
+		}
+		const rec = await manager.create(cwd);
 		return c.json({ id: rec.id }, 201);
 	});
 
@@ -176,6 +199,8 @@ export function createApp(
 			createdAt: rec.createdAt,
 			filePath: rec.filePath,
 			turn: rec.running ? "running" : "idle",
+			// M2：权限切换器初始档位（web 进入会话时免再查 /permission）
+			permissionMode: manager.permission(rec.id),
 			usage,
 		});
 	});
@@ -220,18 +245,114 @@ export function createApp(
 			return c.json({ error: "body 需为 {content: string}" }, 400);
 		}
 		try {
-			await manager.send(rec.id, parsed.data.content);
+			const outcome = await manager.send(rec.id, parsed.data.content);
+			// 内置指令（/help、/permission）：不进模型、不落盘，200 本地应答；
+			// 普通消息保持 202（已挂进 turn 串行链）
+			if (outcome.reply !== null) {
+				return c.json({ reply: outcome.reply }, 200);
+			}
 		} catch (err) {
-			// 未知斜杠命令：400 并带可用命令（消息不进入回合）
+			// 未知斜杠命令与内置指令参数错误：400 并带原因（消息不进入回合）
 			if (err instanceof PromptCommandError) {
 				return c.json({ error: err.message }, 400);
+			}
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
 			}
 			throw err;
 		}
 		return c.json({}, 202);
 	});
 
-	// M4 Feature⑤：当前会话可用的 prompt templates（web 端 `/` 补全用）
+	// M2 权限模式读写（web 权限切换器）。PUT 走统一切换路径：改运行时持有者 →
+	// 落 permission/changed → 广播 wire permission（durable log 先于瞬态事件到达）
+	app.get("/api/sessions/:id/permission", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		return c.json({ mode: manager.permission(rec.id) });
+	});
+
+	app.put("/api/sessions/:id/permission", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		const body = await readJsonBody(c);
+		const parsed = putPermissionSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json(
+				{ error: 'body 需为 {mode: "readonly"|"workspace"|"full"}' },
+				400,
+			);
+		}
+		await manager.setPermission(rec.id, parsed.data.mode);
+		return c.json({ mode: parsed.data.mode });
+	});
+
+	// M2 队列变更（web 队列条）：steer 仅运行中有意义（空闲无 next-step 消费方 → 409）；
+	// 未命中消息 id → 404（inbox 变更动词未命中不落盘）
+	app.post("/api/sessions/:id/queue/:messageId/steer", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		if (!rec.running) {
+			return c.json({ error: "会话回合未在运行，无法 steer 队列消息" }, 409);
+		}
+		const ok = await manager.steerQueued(rec.id, c.req.param("messageId"));
+		if (!ok) return c.json({ error: "队列中不存在该消息" }, 404);
+		return c.json({}, 202);
+	});
+
+	app.delete("/api/sessions/:id/queue/:messageId", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		const ok = await manager.removeQueued(rec.id, c.req.param("messageId"));
+		if (!ok) return c.json({ error: "队列中不存在该消息" }, 404);
+		return c.body(null, 204);
+	});
+
+	// M2 文本附件上传：写 <home>/uploads/<sessionId>/<counter>-<净化名>（绝不覆盖），
+	// 返回绝对路径供消息内 @<path> 引用；NUL/超 512KB/超 10 个分别 400/413/413
+	app.post("/api/sessions/:id/uploads", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		const body = await readJsonBody(c);
+		const parsed = uploadSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json(
+				{ error: "body 需为 {name: string, content: string}" },
+				400,
+			);
+		}
+		try {
+			const { path } = await manager.saveUpload(
+				rec.id,
+				parsed.data.name,
+				parsed.data.content,
+			);
+			return c.json({ path }, 201);
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// M2 会话工作区浏览（web @ 补全）：只列目录直接子级；realpath 后 startsWith
+	// 校验防逃逸（cwd 自身可列；越界/不存在 → 400）
+	app.get("/api/sessions/:id/fs/ls", async (c) => {
+		const rec = await requireSession(c.req.param("id"));
+		if (rec === null) return c.json({ error: "会话不存在" }, 404);
+		try {
+			return c.json(await manager.listFs(rec.id, c.req.query("path") ?? ""));
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// M2：`/` 菜单数据源——内置指令（builtin: true）置顶 + prompt templates（builtin: false），
+	// web 端按标记分区展示
 	app.get("/api/sessions/:id/prompts", async (c) => {
 		const rec = await requireSession(c.req.param("id"));
 		if (rec === null) return c.json({ error: "会话不存在" }, 404);

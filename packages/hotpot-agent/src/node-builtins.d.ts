@@ -59,6 +59,12 @@ declare module "node:fs/promises" {
 		data: string,
 		encoding: string,
 	): Promise<void>;
+	// 上传落盘用独占旗标（wx）：counter 递增保证唯一，写时再防覆盖兜底
+	export function writeFile(
+		path: string,
+		data: string,
+		options: { encoding?: string; flag?: string },
+	): Promise<void>;
 	export function readdir(path: string): Promise<string[]>;
 	export function readdir(
 		path: string,
@@ -70,6 +76,12 @@ declare module "node:fs/promises" {
 		path: string,
 		options?: { recursive?: boolean; force?: boolean },
 	): Promise<void>;
+	// 会话创建 cwd 校验（须为已存在目录）
+	export function stat(
+		path: string,
+	): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+	// 工作区浏览 realpath 解析（逃逸校验用）
+	export function realpath(path: string): Promise<string>;
 }
 
 declare module "node:fs" {

@@ -1,11 +1,19 @@
 // 会话管理器（M3 服务层核心）：turn 串行化、审批桥接线、seq/订阅广播与 usage 统计。
 // 回合装配镜像 packages/cli/src/chat.ts 的 runChat：
-// - tier = settings.mainAgentTier ?? "high"；new ApprovalChain()，policy !== "never" 时
-//   注册桥 handler（bridge.registerToolAsk）；整体经 createAuditedApprovalChain 落盘审计
-// - policy === "always" 时 decorateWorkerTool 给非 read 工具包预审批（chat.ts withApproval
-//   的等价重写，cli 包不可导入）
+// - tier = settings.mainAgentTier ?? "high"；new ApprovalChain()——链头挂
+//   createPermissionModeChainHead 动态处理器（执行时读 holder：full 直接放行、
+//   其余委托桥 handler bridge.registerToolAsk，运行期切换立即生效）；
+//   整体经 createAuditedApprovalChain 落盘审计
+// - decorateWorkerTool 总是设置 createPermissionModeDecorator(holder)，包装在 execute
+//   时按 holder.mode 动态分派（readonly 预审批非 read 工具；workspace/full 原样放行）；
+//   holder 同时作为 runtime.permissionMode 传入，运行期可被 API 改写（M2）
 // - createRuntime + opts.llm 覆盖 resolveModel（scriptedAdapter 测试注入，同 chat.ts）
 // - createInbox(session, "main", {onCancel, seed})；onPlanApproval 走桥的 registerPlanAsk
+// - M2 新增能力：权限模式 GET/PUT（统一切换路径 applyPermissionMode：持有者 + durable
+//   permission/changed + wire 广播，attach 时 fold 恢复）；队列 steer/remove 薄封装；
+//   文本上传（<home>/uploads/<sessionId>/<counter>-<净化名>，绝不覆盖，10 个/会话上限）；
+//   fs 浏览（realpath + startsWith 防逃逸，跳过隐藏/node_modules，500 条上限）；
+//   内置指令 /help、/permission（send() 里先于 prompt template 解析分发，本地应答）
 // - M4 Feature⑦ MCP：开关打开且 settings.mcpServers 非空时 connectMcpServers 建连，
 //   工具经 mcpTools 注入 runtime；mcp/attached 经 watermark.session 落盘；
 //   mcpCreateClient 为测试注入缝；manager.close 里 closeMcpConnections 统一关闭
@@ -25,8 +33,8 @@
 // live 事件按 seq 序推送——每订阅者的 FIFO 序由单线程同步交付天然保证。
 
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 import type { LlmAdapter, ModelInfo } from "@hotpot/ai";
 import {
 	ApprovalChain,
@@ -43,6 +51,7 @@ import {
 	loadSession,
 	loadSettings,
 	type ModelTier,
+	type PermissionMode,
 	type PromptTemplate,
 	resolveHome,
 	resolveSlashCommand,
@@ -51,12 +60,13 @@ import {
 	type SessionEvent,
 	type SessionSummary,
 	type Settings,
-	type ToolDefinition,
 } from "@hotpot/core";
 import {
 	closeMcpConnections,
 	connectMcpServers,
 	createInbox,
+	createPermissionModeChainHead,
+	createPermissionModeDecorator,
 	createRuntime,
 	foldInbox,
 	type Inbox,
@@ -89,8 +99,6 @@ import {
 // 主agent 的 agentId 固定 "main"：与 orchestrator 包级约定一致
 const MAIN_AGENT_ID = "main";
 
-type ApprovalPolicy = "ask-on-dangerous" | "always" | "never";
-
 export interface SessionRecord {
 	id: string;
 	cwd: string;
@@ -114,6 +122,91 @@ export class PromptCommandError extends Error {
 	}
 }
 
+// M2 REST 4xx 映射：manager 方法对可预期非法输入（上传超限/含 NUL、fs 逃逸等）抛本错误，
+// 路由层按 status 转 {error}+状态码；message 即 {error} 文案。
+// status 收窄为字面量联合：Hono c.json 只接受具体状态码字面量
+export type SessionApiErrorStatus = 400 | 404 | 409 | 413;
+
+export class SessionApiError extends Error {
+	readonly status: SessionApiErrorStatus;
+	constructor(status: SessionApiErrorStatus, message: string) {
+		super(message);
+		this.name = "SessionApiError";
+		this.status = status;
+	}
+}
+
+// send() 结果：内置指令（/help、/permission）不进模型、不落盘，直接本地应答——
+// reply 为客户端渲染文本；普通输入 reply 为 null（消息已挂进 turn 串行链）
+export interface SendOutcome {
+	reply: string | null;
+}
+
+// GET /prompts 列表项：builtin 标记供 web `/` 菜单分区（内置组 + 模板组）
+export interface PromptInfo {
+	name: string;
+	description: string;
+	builtin: boolean;
+}
+
+// fs/ls 目录项：path 为绝对路径（kind 只有 file|dir，其余文件类型直接跳过）
+export interface FsEntry {
+	name: string;
+	path: string;
+	kind: "file" | "dir";
+}
+
+// 权限模式合法值（与 core config 的 PERMISSION_MODES 同序；该常量未导出，此处镜像）
+const PERMISSION_MODE_VALUES: readonly string[] = [
+	"readonly",
+	"workspace",
+	"full",
+];
+
+// M2 上传限制：单文件 ≤512KB、纯文本（无 NUL）、每会话 10 个
+const UPLOAD_MAX_BYTES = 512 * 1024;
+const UPLOAD_MAX_FILES = 10;
+const UPLOAD_NAME_MAX = 120;
+// fs/ls 单次最多返回的目录项数
+const FS_MAX_ENTRIES = 500;
+
+// 上传文件名净化：剥掉路径分隔符（取末段）与 .. 段，trim 后限长；
+// 返回空串表示文件名非法（调用方转 400）
+function sanitizeUploadName(name: string): string {
+	const base = name.split(/[\\/]/).pop() ?? "";
+	return base.replaceAll("..", "").trim().slice(0, UPLOAD_NAME_MAX);
+}
+
+// 斜杠输入解析：trim 后以 / 开头 → {name, args}；其余（含纯 "/"）返回 null
+function parseSlashInput(
+	content: string,
+): { name: string; args: string } | null {
+	const trimmed = content.trim();
+	if (!trimmed.startsWith("/")) return null;
+	const body = trimmed.slice(1);
+	const spIndex = body.search(/\s/);
+	if (spIndex === -1) return { name: body, args: "" };
+	return {
+		name: body.slice(0, spIndex),
+		args: body.slice(spIndex + 1).trim(),
+	};
+}
+
+// /help 应答：列出内置指令，并提示 `/` 同样补全 prompt 模板
+const HELP_REPLY = `可用命令：
+/help — 显示本帮助
+/permission — 查看当前权限模式
+/permission <readonly|workspace|full> — 切换权限模式
+提示：输入 / 还可以补全 prompt 模板。`;
+
+// M2 内置指令注册表：send() 里先于 prompt template 解析分发；未命中的斜杠输入
+// 继续走 resolvePromptMessage（未知 /x 仍抛 PromptCommandError）。run 返回应答文本。
+interface BuiltinCommand {
+	name: string;
+	description: string;
+	run(m: ManagedSession, args: string): Promise<string>;
+}
+
 export interface SessionManagerOptions {
 	home?: string;
 	// 测试注入点：默认时按 settings 的 ModelRef 解析真实适配器（orchestrator 的 resolveModel）；
@@ -135,12 +228,33 @@ export interface SessionManager {
 	get(id: string): SessionRecord | null;
 	list(): Promise<(SessionSummary & { running: boolean })[]>;
 	// turn 串行：挂到该会话的 turnTail 链尾，前一回合（含 followup 补发）结束后才执行。
-	// `/name args` 命中 prompt template 时先展开并落 prompt/invoked；未命中抛 PromptCommandError
-	send(id: string, content: string): Promise<void>;
-	// 当前会话可用的 prompt templates（GET 端点与 web 补全共用）
-	prompts(id: string): { name: string; description: string }[];
+	// `/name args` 命中 prompt template 时先展开并落 prompt/invoked；未命中抛 PromptCommandError。
+	// 内置指令（/help、/permission）在模板解析前拦截，直接本地应答（SendOutcome.reply 非空），
+	// 不进模型、不落盘
+	send(id: string, content: string): Promise<SendOutcome>;
+	// 当前会话可用的 `/` 菜单项：内置指令（builtin: true）置顶 + prompt templates（builtin: false）
+	prompts(id: string): PromptInfo[];
 	// steer/queue 两队列的只读快照（GET /inbox；web 队列条展示用）
 	inbox(id: string): InboxState;
+	// M2 权限模式：GET 读运行时持有者；setPermission 走统一切换路径
+	// （持有者 + durable permission/changed + wire 广播），PUT 端点与 /permission 内置指令共用
+	permission(id: string): PermissionMode;
+	setPermission(id: string, mode: PermissionMode): Promise<void>;
+	// M2 队列变更（web 队列条）：steerQueued 把 next-turn 指定消息移入 next-step
+	// （仅运行中有意义，REST 层 409 拦截空闲调用）；removeQueued 移除 next-turn 指定消息。
+	// 未命中返回 false（REST 层转 404）
+	steerQueued(id: string, messageId: string): Promise<boolean>;
+	removeQueued(id: string, messageId: string): Promise<boolean>;
+	// M2 文本附件上传：写 <home>/uploads/<sessionId>/<counter>-<净化名>（绝不覆盖），
+	// 返回绝对路径；NUL/超限/超量抛 SessionApiError（413/400）
+	saveUpload(
+		id: string,
+		name: string,
+		content: string,
+	): Promise<{ path: string }>;
+	// M2 工作区浏览（web @ 补全）：列 cwd 子目录直接子级（dirs 优先、上限 500）；
+	// relPath 支持绝对/相对，realpath 后越出 cwd 抛 SessionApiError(400)
+	listFs(id: string, relPath: string): Promise<{ entries: FsEntry[] }>;
 	steer(id: string, content: string): Promise<void>;
 	cancel(id: string): void;
 	answerToolApproval(
@@ -258,44 +372,77 @@ function wrapAppend(session: Session): AppendWatermark {
 	};
 }
 
-// ---- policy=always 的 worker 工具预审批包装（chat.ts withApproval 的等价重写） ----
-
-function truncate(text: string, max: number): string {
-	return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
-// 工具入参摘要：input 来自 runTurn 的 JSON.parse，恒为 JSON-safe；防御性 try/catch 兜底
-function summarizeInput(input: unknown): string {
-	let text: string;
-	try {
-		text = JSON.stringify(input) ?? "";
-	} catch {
-		text = String(input);
+// permission 恢复（与 attachById 的 foldInbox 播种同址）：按事件顺序对
+// permission/changed 做 last-write-wins 折叠，取最后一次切换结果；
+// 无记录返回 null（退回 settings 默认）
+function foldPermissionMode(events: SessionEvent[]): PermissionMode | null {
+	let mode: PermissionMode | null = null;
+	for (const e of events) {
+		if (e.type === "permission/changed") {
+			mode = e.mode;
+		}
 	}
-	return truncate(text, 120);
+	return mode;
 }
 
-function withApproval<T>(
-	tool: ToolDefinition<T>,
-	kind: "command" | "write",
-): ToolDefinition<T> {
-	return {
-		...tool,
-		execute: async (args, ctx) => {
-			const decision = await ctx.approval.ask({
-				kind,
-				summary: `Run tool "${tool.name}" (approval policy: always)`,
-				detail: summarizeInput(args),
-			});
-			if (decision === "deny") {
-				return {
-					content: `tool "${tool.name}" denied by approval`,
-					isError: true,
-				};
+// 权限切换统一路径（PUT /permission 与 /permission 内置指令共用）：
+// 改写运行时持有者（与 decorator 共享引用，立即生效）→ 落 permission/changed
+// （source: "user"）→ 等 tailer 把 log 推齐后广播瞬态 permission 事件
+// （边界同步同 plan 事件：订阅者先收到 durable log、再收到瞬态通知）
+async function applyPermissionMode(
+	m: ManagedSession,
+	mode: PermissionMode,
+): Promise<void> {
+	m.runtime.permissionMode.mode = mode;
+	await m.runtime.session.append({
+		type: "permission/changed",
+		id: randomUUID(),
+		ts: new Date().toISOString(),
+		mode,
+		source: "user",
+	});
+	await m.syncDurable();
+	m.emit({ kind: "permission", mode });
+}
+
+// M2 内置指令：/help 本地应答；/permission 无参报当前档、带参走统一切换路径
+const BUILTIN_COMMANDS: BuiltinCommand[] = [
+	{
+		name: "help",
+		description: "显示可用命令帮助",
+		run: async () => HELP_REPLY,
+	},
+	{
+		name: "permission",
+		description: "查看或切换权限模式（readonly|workspace|full）",
+		run: async (m, args) => {
+			if (args === "") {
+				return `当前权限模式：${m.runtime.permissionMode.mode}`;
 			}
-			return tool.execute(args, ctx);
+			if (!PERMISSION_MODE_VALUES.includes(args)) {
+				throw new SessionApiError(
+					400,
+					`无效权限模式 "${args}"，有效值：${PERMISSION_MODE_VALUES.join(", ")}`,
+				);
+			}
+			const mode = args as PermissionMode;
+			await applyPermissionMode(m, mode);
+			return `权限模式已切换为：${mode}`;
 		},
-	};
+	},
+];
+
+// 内置指令分发：命中注册表返回应答文本；非斜杠输入或未知斜杠返回 null，
+// 交回常规解析（未知 /x 仍由 resolvePromptMessage 抛 PromptCommandError）
+async function runBuiltin(
+	m: ManagedSession,
+	content: string,
+): Promise<string | null> {
+	const parsed = parseSlashInput(content);
+	if (parsed === null) return null;
+	const cmd = BUILTIN_COMMANDS.find((b) => b.name === parsed.name);
+	if (cmd === undefined) return null;
+	return cmd.run(m, parsed.args);
 }
 
 export function createSessionManager(
@@ -355,6 +502,9 @@ export function createSessionManager(
 		// 遥测会话起点（毫秒）：create 用 meta.createdAt，attach 用挂接时刻
 		startedAt: number;
 		inboxSeed?: InboxState;
+		// M2 权限恢复：attach 时 fold permission/changed 的最后一次切换结果，
+		// 优先于 settings.permission.mode（last-write-wins 已折叠完成）
+		permissionSeed?: PermissionMode;
 	}): Promise<ManagedSession> {
 		const { settings, cwd } = init;
 		const tier = settings.mainAgentTier ?? "high";
@@ -396,27 +546,30 @@ export function createSessionManager(
 			}
 		});
 
-		// 审批装配镜像 chat.ts：server handler 挂内层链，整体经审计包装落盘 asked/decided。
-		// never：不注册 handler，fail-closed 全部 deny（不打扰用户，也不放行）
-		const policy: ApprovalPolicy =
-			settings.approval?.policy ?? "ask-on-dangerous";
+		// 审批装配镜像 chat.ts：链头挂 createPermissionModeChainHead 动态处理器——
+		// 执行时读 holder：full 任何询问直接放行（运行期切换立即生效，永不打断），
+		// readonly/workspace 委托桥 handler（parked promise 等 web 应答）。
+		// 默认 workspace；holder 与 runtime.permissionMode 共享引用，运行期可被改写（M2）；
+		// attach 恢复时 permissionSeed（fold permission/changed）优先于 settings
+		const mode: PermissionMode =
+			init.permissionSeed ?? settings.permission?.mode ?? "workspace";
+		const permissionHolder: { mode: PermissionMode } = { mode };
 		const baseApproval = new ApprovalChain();
-		if (policy !== "never") {
-			baseApproval.use((req) => bridge.registerToolAsk(req));
-		}
+		baseApproval.use(
+			createPermissionModeChainHead(permissionHolder, (req) =>
+				bridge.registerToolAsk(req),
+			),
+		);
 		const approval = createAuditedApprovalChain(baseApproval, {
 			session: watermark.session,
 			agentId: MAIN_AGENT_ID,
 		});
 
-		// policy=always：worker/task 的 bash/write/edit 包一层预审批；read 不包（无副作用）
-		const decorateWorkerTool: WorkerToolDecorator | undefined =
-			policy === "always"
-				? (tool) =>
-						tool.name === "read"
-							? tool
-							: withApproval(tool, tool.name === "bash" ? "command" : "write")
-				: undefined;
+		// decorateWorkerTool 总是设置：包装在 execute 时读 holder.mode 动态分派——
+		// readonly 给非 read 工具逐个预审批；workspace/full 原样放行（workspace 靠工具
+		// 内建危险判定询问，full 靠上面链头的 allowAllHandler 兜底）
+		const decorateWorkerTool: WorkerToolDecorator =
+			createPermissionModeDecorator(permissionHolder);
 
 		// M4 Feature⑦ MCP：开关（features.mcp，默认开）打开且配置了 server 才连接。
 		// 单 server 失败由 connectMcpServers 内部告警跳过，不阻塞装配；连接成功逐个经
@@ -489,6 +642,7 @@ export function createSessionManager(
 			maxParallelTasks: settings.maxParallelTasks,
 			planMaxRevisions: settings.planMaxRevisions,
 			decorateWorkerTool,
+			permissionMode: permissionHolder,
 			features: settings.features,
 			skills,
 			mcpTools: mcpConnections.flatMap((c) => c.tools),
@@ -824,6 +978,7 @@ export function createSessionManager(
 				createdAt: meta.createdAt,
 				startedAt: Date.now(),
 				inboxSeed: foldInbox(events),
+				permissionSeed: foldPermissionMode(events) ?? undefined,
 			});
 			managed.set(m.id, m);
 			emitSessionStart(m, true);
@@ -843,23 +998,151 @@ export function createSessionManager(
 			});
 		},
 
-		async send(id: string, content: string): Promise<void> {
+		async send(id: string, content: string): Promise<SendOutcome> {
 			const m = requireManaged(id);
+			// 内置指令（/help、/permission）先于 prompt template 解析：直接本地应答，
+			// 不进模型、不落盘（/permission 带参走统一切换路径，会落 permission/changed）
+			const builtinReply = await runBuiltin(m, content);
+			if (builtinReply !== null) {
+				return { reply: builtinReply };
+			}
 			const message = await resolvePromptMessage(m, content);
-			const run = () => runTurnWithFollowups(m, message);
-			// turn 串行链：挂到链尾；链断（前序异常）也不跳过本回合（runOneTurn 自身不抛）
-			m.turnTail = m.turnTail.then(run, run);
+			// 运行中发送 = 排队（next-turn）：落 durable inbox/spliced，web QueueBar 立即展示；
+			// 点击条目可转 steer（M2 端点），当前回合的 followup 补发循环在回合结束后消费。
+			// 与旧实现（直接串到 turnTail）的区别：排队消息有队列可见性、可 steer/移除
+			if (m.holder.running) {
+				await m.inbox.followup(message);
+				// 兜底：入队瞬间当前回合恰好走完最后一次 drain（消息将无人消费）——
+				// 挂一个尾任务，回合空闲时再拉一次；若已被补发循环消费，这里为空操作
+				const drainIfIdle = async (): Promise<void> => {
+					if (m.closing || m.holder.running) return;
+					const queued = await m.inbox.drainNextTurn();
+					for (const q of queued) {
+						await runTurnWithFollowups(m, q.content);
+					}
+				};
+				m.turnTail = m.turnTail.then(drainIfIdle, drainIfIdle);
+			} else {
+				const run = () => runTurnWithFollowups(m, message);
+				// turn 串行链：挂到链尾；链断（前序异常）也不跳过本回合（runOneTurn 自身不抛）
+				m.turnTail = m.turnTail.then(run, run);
+			}
+			return { reply: null };
 		},
 
-		prompts(id: string): { name: string; description: string }[] {
-			return requireManaged(id).promptTemplates.map((t) => ({
-				name: t.name,
-				description: t.description,
-			}));
+		prompts(id: string): PromptInfo[] {
+			const m = requireManaged(id);
+			// 内置指令置顶 + prompt templates，builtin 标记供 web `/` 菜单分区
+			return [
+				...BUILTIN_COMMANDS.map((b) => ({
+					name: b.name,
+					description: b.description,
+					builtin: true,
+				})),
+				...m.promptTemplates.map((t) => ({
+					name: t.name,
+					description: t.description,
+					builtin: false,
+				})),
+			];
 		},
 
 		inbox(id: string): InboxState {
 			return requireManaged(id).inbox.snapshot();
+		},
+
+		permission(id: string): PermissionMode {
+			return requireManaged(id).runtime.permissionMode.mode;
+		},
+
+		async setPermission(id: string, mode: PermissionMode): Promise<void> {
+			await applyPermissionMode(requireManaged(id), mode);
+		},
+
+		async steerQueued(id: string, messageId: string): Promise<boolean> {
+			return requireManaged(id).inbox.steerQueued(messageId);
+		},
+
+		async removeQueued(id: string, messageId: string): Promise<boolean> {
+			return requireManaged(id).inbox.removeNextTurn(messageId);
+		},
+
+		async saveUpload(
+			id: string,
+			name: string,
+			content: string,
+		): Promise<{ path: string }> {
+			const m = requireManaged(id);
+			// 纯文本校验：NUL 字节视为二进制（v1 附件只支持文本）
+			if (content.includes("\0")) {
+				throw new SessionApiError(
+					400,
+					"仅支持纯文本附件（内容含 NUL 字节，疑似二进制文件）",
+				);
+			}
+			if (new TextEncoder().encode(content).length > UPLOAD_MAX_BYTES) {
+				throw new SessionApiError(
+					413,
+					"附件内容超过 512KB 上限（v1 仅支持纯文本）",
+				);
+			}
+			const sanitized = sanitizeUploadName(name);
+			if (sanitized === "") {
+				throw new SessionApiError(400, "文件名非法（净化后为空）");
+			}
+			const dir = join(resolveHome(opts.home), "uploads", m.id);
+			await mkdir(dir, { recursive: true });
+			// 计数取磁盘现状：重启后不与既有文件冲突；达到上限拒绝（413）
+			const existing = await readdir(dir);
+			if (existing.length >= UPLOAD_MAX_FILES) {
+				throw new SessionApiError(413, "本会话上传文件数已达上限（10 个）");
+			}
+			const filePath = join(dir, `${existing.length + 1}-${sanitized}`);
+			// wx 独占创建：counter 递增已保证唯一，写时再加旗标兜底绝不覆盖
+			await writeFile(filePath, content, { encoding: "utf8", flag: "wx" });
+			return { path: filePath };
+		},
+
+		async listFs(id: string, relPath: string): Promise<{ entries: FsEntry[] }> {
+			const m = requireManaged(id);
+			const realCwd = await realpath(m.cwd);
+			let realTarget: string;
+			try {
+				// relPath 为 "" 时 resolve 回 cwd 自身；绝对路径原样采用（@ 补全语义），
+				// 逃逸与否由下方 startsWith 校验裁定
+				realTarget = await realpath(resolve(m.cwd, relPath));
+			} catch {
+				throw new SessionApiError(400, `path 不存在或不可访问: ${relPath}`);
+			}
+			// 逃逸校验：realTarget 必须等于 cwd 或位于其下（前缀带尾部分隔符，
+			// 防 /foo/bar 误命中 /foo/bar2；cwd 为根目录时前缀即根，天然放行）
+			const prefix = realCwd.endsWith(sep) ? realCwd : `${realCwd}${sep}`;
+			if (realTarget !== realCwd && !realTarget.startsWith(prefix)) {
+				throw new SessionApiError(400, "path 越出会话工作目录");
+			}
+			const dirents = await readdir(realTarget, { withFileTypes: true });
+			const entries: FsEntry[] = [];
+			for (const d of dirents) {
+				// 跳过隐藏项与 node_modules（.git 属隐藏项已覆盖）
+				if (d.name.startsWith(".") || d.name === "node_modules") continue;
+				const kind = d.isDirectory() ? "dir" : d.isFile() ? "file" : null;
+				if (kind === null) continue;
+				entries.push({ name: d.name, path: join(realTarget, d.name), kind });
+				if (entries.length >= FS_MAX_ENTRIES) break;
+			}
+			// dirs 优先，同档按名字典序
+			entries.sort((a, b) =>
+				a.kind === b.kind
+					? a.name < b.name
+						? -1
+						: a.name > b.name
+							? 1
+							: 0
+					: a.kind === "dir"
+						? -1
+						: 1,
+			);
+			return { entries };
 		},
 
 		async steer(id: string, content: string): Promise<void> {

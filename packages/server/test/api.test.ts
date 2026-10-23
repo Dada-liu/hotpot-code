@@ -19,6 +19,7 @@ import type * as CoreMod from "@hotpot/core";
 import {
 	createSession as createDiskSession,
 	loadSession,
+	type PermissionMode,
 	type Settings,
 } from "@hotpot/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -89,10 +90,10 @@ interface ApiFixture {
 
 const fixtures: ApiFixture[] = [];
 
-// 每用例一套：home 写三档 settings（policy 按场景），端口 0 由系统分配
+// 每用例一套：home 写三档 settings（permission.mode 按场景），端口 0 由系统分配
 async function startApi(
 	adapter: LlmAdapter,
-	policy?: "ask-on-dangerous" | "always" | "never",
+	mode?: PermissionMode,
 ): Promise<ApiFixture> {
 	const home = await mkdtemp(join(tmpdir(), "hotpot-api-home-"));
 	const proj = await mkdtemp(join(tmpdir(), "hotpot-api-proj-"));
@@ -103,7 +104,7 @@ async function startApi(
 			medium: { provider: "test-provider", model: "test-medium", apiKey: "mk" },
 			low: { provider: "test-provider", model: "test-low", apiKey: "lk" },
 		},
-		...(policy === undefined ? {} : { approval: { policy } }),
+		...(mode === undefined ? {} : { permission: { mode } }),
 	};
 	await writeFile(
 		join(home, "settings.json"),
@@ -335,7 +336,7 @@ describe("HTTP API", () => {
 	it("完整回合：建会话→发消息→SSE 按序 log(meta)/turn(start)/log(user_msg)/delta/log(assistant_msg)/turn(end)，id 单调", async () => {
 		const fx = await startApi(
 			scriptedAdapter([textRound("脚本回答", { input: 10, output: 5 })]),
-			"never",
+			"full",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -400,7 +401,7 @@ describe("HTTP API", () => {
 				textRound("回答一", { input: 10, output: 5 }),
 				textRound("回答二", { input: 10, output: 5 }),
 			]),
-			"never",
+			"full",
 		);
 		const { id } = await createSession(fx, fx.proj);
 		const sse1 = await openSse(fx.base, id);
@@ -506,7 +507,7 @@ describe("HTTP API", () => {
 				textRound("历史回答", { input: 10, output: 5 }),
 				textRound("回答二", { input: 10, output: 5 }),
 			]),
-			"never",
+			"full",
 		);
 		const { id } = await createSession(fx, fx.proj);
 		// 观察哨（直接 manager 订阅）：判定 live 事件已广播——即重连连接的包装 sink 已收到
@@ -571,7 +572,7 @@ describe("HTTP API", () => {
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"ask-on-dangerous",
+			"workspace",
 		);
 		const { id } = await createSession(fx, fx.proj);
 		const sse = await openSse(fx.base, id);
@@ -656,7 +657,7 @@ tests pass
 				textRound("auth 路由已完成。", { input: 500, output: 100 }),
 				textRound("用户认证已按计划实现。", { input: 100, output: 20 }),
 			]),
-			"ask-on-dangerous",
+			"workspace",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -720,7 +721,7 @@ tests pass
 	it("404/400 分支与 cwd 默认", async () => {
 		const fx = await startApi(
 			scriptedAdapter([textRound("回答", { input: 10, output: 5 })]),
-			"never",
+			"full",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -821,7 +822,7 @@ tests pass
 		// CLI 创建的会话在 web 列表可见却打不开（404）。requireSession 降级
 		// attachById 后，此处直接经 core 写磁盘会话文件（不经 HTTP create 路由），
 		// 模拟「非本 server 进程托管」的现存会话
-		const fx = await startApi(scriptedAdapter([]), "never");
+		const fx = await startApi(scriptedAdapter([]), "full");
 		const disk = await createDiskSession(fx.proj, fx.home);
 
 		// 列表可见（listSessions 读磁盘）
@@ -856,7 +857,7 @@ tests pass
 	it("prompt templates：GET 列表；/命令展开为模板正文并落 prompt/invoked；未知命令 400", async () => {
 		const fx = await startApi(
 			scriptedAdapter([textRound("已执行", { input: 3, output: 2 })]),
-			"never",
+			"full",
 		);
 		await mkdir(join(fx.home, "prompts"), { recursive: true });
 		await writeFile(
@@ -866,11 +867,23 @@ tests pass
 		);
 		const { id } = await createSession(fx, fx.proj);
 
-		// 模板清单（web 端 `/` 补全的数据源）
+		// 模板清单（web 端 `/` 补全的数据源）：内置指令置顶（builtin: true）+ 模板（builtin: false）
 		const listRes = await fetch(`${fx.base}/api/sessions/${id}/prompts`);
 		expect(listRes.status).toBe(200);
 		expect(await listRes.json()).toEqual({
-			prompts: [{ name: "commit", description: "Commit helper" }],
+			prompts: [
+				{
+					name: "help",
+					description: "显示可用命令帮助",
+					builtin: true,
+				},
+				{
+					name: "permission",
+					description: "查看或切换权限模式（readonly|workspace|full）",
+					builtin: true,
+				},
+				{ name: "commit", description: "Commit helper", builtin: false },
+			],
 		});
 
 		// 未知斜杠命令：400，且消息不进入回合
@@ -909,7 +922,7 @@ tests pass
 	}, 20000);
 
 	it("inbox 快照：空队列、POST steer 后 next-step 出现消息；未知会话 404", async () => {
-		const fx = await startApi(scriptedAdapter([]), "never");
+		const fx = await startApi(scriptedAdapter([]), "full");
 		const { id } = await createSession(fx, fx.proj);
 
 		const empty = (await (
@@ -946,7 +959,7 @@ tests pass
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"ask-on-dangerous",
+			"workspace",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -1015,7 +1028,7 @@ tests pass
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"ask-on-dangerous",
+			"workspace",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -1058,7 +1071,405 @@ tests pass
 	}, 20000);
 });
 
-// ---- 模型设置路由（web 设置弹窗）：只读写用户级 settings.json 的 models/mainAgentTier ----
+// ---- M2：权限/队列/上传/fs 端点、内置指令、cwd 校验 ----
+
+describe("M2 endpoints", () => {
+	it("权限端点：GET 默认 workspace → PUT full 生效；SSE 收 permission 事件（durable log 在前）；落 permission/changed；attach 恢复还原用户档位", async () => {
+		const fx = await startApi(scriptedAdapter([]));
+		const { id } = await createSession(fx, fx.proj);
+
+		// 详情带初始档位；GET /permission 默认 workspace（settings 未配 permission）
+		const detail0 = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { permissionMode: string };
+		expect(detail0.permissionMode).toBe("workspace");
+		const get0 = (await (
+			await fetch(`${fx.base}/api/sessions/${id}/permission`)
+		).json()) as { mode: string };
+		expect(get0).toEqual({ mode: "workspace" });
+
+		// 非法 body → 400；未知会话 GET/PUT → 404
+		const badPut = await fetch(`${fx.base}/api/sessions/${id}/permission`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ mode: "bogus" }),
+		});
+		expect(badPut.status).toBe(400);
+		expect(
+			(await fetch(`${fx.base}/api/sessions/nope/permission`)).status,
+		).toBe(404);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/nope/permission`, {
+					method: "PUT",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ mode: "full" }),
+				})
+			).status,
+		).toBe(404);
+
+		// SSE 订阅后切换：瞬态 permission 事件到达，且 durable log 在前
+		const sse = await openSse(fx.base, id);
+		const putRes = await fetch(`${fx.base}/api/sessions/${id}/permission`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ mode: "full" }),
+		});
+		expect(putRes.status).toBe(200);
+		expect(await putRes.json()).toEqual({ mode: "full" });
+		await sse.waitFor(() =>
+			sse.events.some((e) => e.kind === "permission" && e.mode === "full"),
+		);
+		const wireIdx = sse.events.findIndex(
+			(e) => e.kind === "permission" && e.mode === "full",
+		);
+		const logIdx = sse.events.findIndex(
+			(e) => isLog(e) && e.event.type === "permission/changed",
+		);
+		expect(wireIdx).toBeGreaterThan(-1);
+		expect(logIdx).toBeGreaterThan(-1);
+		expect(logIdx).toBeLessThan(wireIdx);
+		sse.close();
+
+		// GET 反映新档位；日志落 permission/changed（source: "user"）
+		const get1 = (await (
+			await fetch(`${fx.base}/api/sessions/${id}/permission`)
+		).json()) as { mode: string };
+		expect(get1).toEqual({ mode: "full" });
+		const detail1 = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { filePath: string };
+		const { events: fileEvents } = await loadSession(detail1.filePath);
+		expect(
+			fileEvents.some(
+				(e) =>
+					e.type === "permission/changed" &&
+					e.mode === "full" &&
+					e.source === "user",
+			),
+		).toBe(true);
+
+		// 恢复：本 manager 摘托管后，新 manager attachById 经 fold 还原 "full"
+		//（settings 默认 workspace，还原值以用户切换为准）
+		await fx.manager.close(id);
+		const sm2 = createSessionManager({
+			home: fx.home,
+			llm: { adapter: scriptedAdapter([]), model: MODEL },
+		});
+		const attached = await sm2.attachById(id);
+		if (attached === null) throw new Error("attachById 未命中");
+		expect(sm2.permission(attached.id)).toBe("full");
+		await sm2.close(attached.id);
+	}, 20000);
+
+	it("队列端点：空闲 steer 409；DELETE 移除 204/未命中 404；运行中 steer 202 移入 next-step、未知 id 404", async () => {
+		const fx = await startApi(
+			scriptedAdapter([
+				spawnSimpleRound("清理临时目录 x"),
+				toolCallRound("bash", "w-tc-1", '{"command":"rm -rf x"}'),
+				textRound("清理完成。", { input: 50, output: 10 }),
+				textRound("临时目录已清理。", { input: 20, output: 5 }),
+			]),
+			"workspace",
+		);
+		// 种子会话：磁盘日志预置 next-turn 全量快照（等价上次进程排队落盘），
+		// HTTP attach 时 foldInbox 播种进内存队列
+		const disk = await createDiskSession(fx.proj, fx.home);
+		await disk.append({
+			type: "inbox/spliced",
+			id: "seed-1",
+			ts: new Date().toISOString(),
+			agentId: "main",
+			queue: "next-turn",
+			messages: [
+				{ id: "q-1", content: "排队一" },
+				{ id: "q-2", content: "排队二" },
+				{ id: "q-3", content: "排队三" },
+			],
+		});
+		const inboxOf = async (): Promise<{
+			nextTurn: { id: string; content: string }[];
+			nextStep: { id: string; content: string }[];
+		}> => {
+			const res = await fetch(`${fx.base}/api/sessions/${disk.id}/inbox`);
+			expect(res.status).toBe(200);
+			return (await res.json()) as {
+				nextTurn: { id: string; content: string }[];
+				nextStep: { id: string; content: string }[];
+			};
+		};
+
+		// attach 播种成功
+		expect((await inboxOf()).nextTurn.map((m) => m.id)).toEqual([
+			"q-1",
+			"q-2",
+			"q-3",
+		]);
+
+		// 空闲会话 steer：无 next-step 消费方 → 409
+		expect(
+			(await postJson(`${fx.base}/api/sessions/${disk.id}/queue/q-1/steer`))
+				.status,
+		).toBe(409);
+
+		// DELETE：命中 204，未命中 404
+		const del1 = await fetch(`${fx.base}/api/sessions/${disk.id}/queue/q-2`, {
+			method: "DELETE",
+		});
+		expect(del1.status).toBe(204);
+		expect((await inboxOf()).nextTurn.map((m) => m.id)).toEqual(["q-1", "q-3"]);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/${disk.id}/queue/q-2`, {
+					method: "DELETE",
+				})
+			).status,
+		).toBe(404);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/${disk.id}/queue/nope`, {
+					method: "DELETE",
+				})
+			).status,
+		).toBe(404);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/nope/queue/q-1`, {
+					method: "DELETE",
+				})
+			).status,
+		).toBe(404);
+
+		// 发消息起回合（bash 高危挂起等审批 → running），期间做 steer/DELETE
+		const sse = await openSse(fx.base, disk.id);
+		const msgRes = await postJson(
+			`${fx.base}/api/sessions/${disk.id}/messages`,
+			{ content: "清理临时目录" },
+		);
+		expect(msgRes.status).toBe(202);
+		await sse.waitFor(() => sse.events.some((e) => e.kind === "approval"));
+
+		// 运行中 steer：命中 202，消息移入 next-step
+		const steerRes = await postJson(
+			`${fx.base}/api/sessions/${disk.id}/queue/q-1/steer`,
+		);
+		expect(steerRes.status).toBe(202);
+		const afterSteer = await inboxOf();
+		expect(afterSteer.nextTurn.map((m) => m.id)).toEqual(["q-3"]);
+		expect(afterSteer.nextStep.map((m) => m.id)).toEqual(["q-1"]);
+
+		// 未知 id steer → 404；已移走的 q-1 在 next-step，对 next-turn 的删除 → 404
+		expect(
+			(await postJson(`${fx.base}/api/sessions/${disk.id}/queue/nope/steer`))
+				.status,
+		).toBe(404);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/${disk.id}/queue/q-1`, {
+					method: "DELETE",
+				})
+			).status,
+		).toBe(404);
+		expect(
+			(
+				await fetch(`${fx.base}/api/sessions/${disk.id}/queue/q-3`, {
+					method: "DELETE",
+				})
+			).status,
+		).toBe(204);
+		expect((await inboxOf()).nextTurn).toEqual([]);
+
+		// 收尾：放行审批等回合结束（steer 进 next-step 的消息可能被回合中途消费，属预期）
+		const approval = sse.events.find((e) => e.kind === "approval");
+		if (approval?.kind !== "approval") throw new Error("approval 事件缺失");
+		await postJson(
+			`${fx.base}/api/sessions/${disk.id}/approvals/${approval.requestId}`,
+			{ decision: "allow" },
+		);
+		await sse.waitFor(() => sse.events.some(isTurnEnd));
+		sse.close();
+	}, 20000);
+
+	it("上传端点：201 落盘 round-trip + 路径净化；同名不覆盖；NUL 400；超 512KB 413；第 11 个 413；未知会话 404", async () => {
+		const fx = await startApi(scriptedAdapter([]));
+		const { id } = await createSession(fx, fx.proj);
+		const upload = (name: string, content: string): Promise<Response> =>
+			postJson(`${fx.base}/api/sessions/${id}/uploads`, { name, content });
+
+		// 正常上传：201 + 绝对路径，文件内容 round-trip
+		const res1 = await upload("note.txt", "hello hotpot\n");
+		expect(res1.status).toBe(201);
+		const { path: path1 } = (await res1.json()) as { path: string };
+		expect(path1.endsWith(join("uploads", id, "1-note.txt"))).toBe(true);
+		expect(existsSync(path1)).toBe(true);
+		expect(await readFile(path1, "utf8")).toBe("hello hotpot\n");
+
+		// 路径净化：../../ 被剥掉，只留净化文件名
+		const res2 = await upload("../../evil.txt", "x");
+		expect(res2.status).toBe(201);
+		const { path: path2 } = (await res2.json()) as { path: string };
+		expect(path2.endsWith("2-evil.txt")).toBe(true);
+
+		// 同名再传：counter 递增不覆盖旧文件
+		const res3 = await upload("note.txt", "新版本");
+		expect(res3.status).toBe(201);
+		const { path: path3 } = (await res3.json()) as { path: string };
+		expect(path3.endsWith("3-note.txt")).toBe(true);
+		expect(path3).not.toBe(path1);
+		expect(await readFile(path1, "utf8")).toBe("hello hotpot\n");
+
+		// NUL 字节 → 400（仅纯文本）
+		const nulRes = await upload("bin.dat", "a\0b");
+		expect(nulRes.status).toBe(400);
+		const nulBody = (await nulRes.json()) as { error: string };
+		expect(nulBody.error).toContain("NUL");
+
+		// 超过 512KB → 413
+		const bigRes = await upload("big.txt", "x".repeat(512 * 1024 + 1));
+		expect(bigRes.status).toBe(413);
+
+		// 边界：恰好 512KB 合法
+		expect((await upload("edge.txt", "x".repeat(512 * 1024))).status).toBe(201);
+
+		// 已传 4 个，补到 10 个上限均 201，第 11 个 → 413
+		for (let i = 5; i <= 10; i++) {
+			expect((await upload(`f${i}.txt`, "y")).status).toBe(201);
+		}
+		expect((await upload("f11.txt", "y")).status).toBe(413);
+
+		// 未知会话 → 404
+		expect(
+			(
+				await postJson(`${fx.base}/api/sessions/nope/uploads`, {
+					name: "a.txt",
+					content: "a",
+				})
+			).status,
+		).toBe(404);
+	}, 20000);
+
+	it("fs/ls：列 cwd 子级（dirs 优先 + 名字序、跳过隐藏/node_modules）；嵌套 path；../.. 逃逸 400；未知会话 404", async () => {
+		const fx = await startApi(scriptedAdapter([]));
+		const { id } = await createSession(fx, fx.proj);
+		// 搭目录结构：note.txt（夹具已有）+ alpha/ sub/ + 隐藏项 + node_modules
+		await mkdir(join(fx.proj, "alpha"));
+		await mkdir(join(fx.proj, "sub"));
+		await mkdir(join(fx.proj, "node_modules"));
+		await writeFile(join(fx.proj, ".hidden"), "s", "utf8");
+		await writeFile(join(fx.proj, "zeta.txt"), "z", "utf8");
+		await writeFile(join(fx.proj, "sub", "inner.txt"), "i", "utf8");
+
+		const ls = async (
+			query?: string,
+		): Promise<{ entries: { name: string; kind: string }[] }> => {
+			const url =
+				query === undefined
+					? `${fx.base}/api/sessions/${id}/fs/ls`
+					: `${fx.base}/api/sessions/${id}/fs/ls?path=${encodeURIComponent(query)}`;
+			const res = await fetch(url);
+			expect(res.status).toBe(200);
+			return (await res.json()) as {
+				entries: { name: string; kind: string }[];
+			};
+		};
+
+		const root = await ls();
+		// dirs 优先（alpha < sub），再文件（note.txt < zeta.txt）；.hidden/node_modules 被跳过
+		expect(root.entries.map((e) => `${e.kind}:${e.name}`)).toEqual([
+			"dir:alpha",
+			"dir:sub",
+			"file:note.txt",
+			"file:zeta.txt",
+		]);
+
+		const nested = await ls("sub");
+		expect(nested.entries.map((e) => `${e.kind}:${e.name}`)).toEqual([
+			"file:inner.txt",
+		]);
+		// 空串等价于缺省（列 cwd 自身）
+		expect((await ls("")).entries.length).toBe(root.entries.length);
+
+		// 逃逸：相对 ../.. 与绝对外部路径均 400；未知会话 404
+		const escape1 = await fetch(
+			`${fx.base}/api/sessions/${id}/fs/ls?path=${encodeURIComponent("../..")}`,
+		);
+		expect(escape1.status).toBe(400);
+		const escape2 = await fetch(
+			`${fx.base}/api/sessions/${id}/fs/ls?path=${encodeURIComponent(fx.home)}`,
+		);
+		expect(escape2.status).toBe(400);
+		expect((await fetch(`${fx.base}/api/sessions/nope/fs/ls`)).status).toBe(
+			404,
+		);
+	}, 20000);
+
+	it("createSession cwd 校验：不存在/不是目录 → 400；合法目录 → 201 且 cwd 生效", async () => {
+		const fx = await startApi(scriptedAdapter([]));
+
+		const missing = await postJson(`${fx.base}/api/sessions`, {
+			cwd: join(fx.proj, "no-such-dir"),
+		});
+		expect(missing.status).toBe(400);
+		const notDir = await postJson(`${fx.base}/api/sessions`, {
+			cwd: join(fx.proj, "note.txt"),
+		});
+		expect(notDir.status).toBe(400);
+
+		const ok = await postJson(`${fx.base}/api/sessions`, { cwd: fx.proj });
+		expect(ok.status).toBe(201);
+		const { id } = (await ok.json()) as { id: string };
+		const detail = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { cwd: string };
+		expect(detail.cwd).toBe(fx.proj);
+	}, 20000);
+
+	it("内置指令：/help 200 {reply} 不落盘；/permission readonly 切换 + {reply}；裸查当前档；非法值 400", async () => {
+		const fx = await startApi(scriptedAdapter([]));
+		const { id } = await createSession(fx, fx.proj);
+
+		// /help：200 本地应答，无 user_msg 落盘
+		const helpRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
+			content: "/help",
+		});
+		expect(helpRes.status).toBe(200);
+		const helpBody = (await helpRes.json()) as { reply: string };
+		expect(helpBody.reply).toContain("/permission");
+		const detail = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { filePath: string };
+		const { events: fileEvents } = await loadSession(detail.filePath);
+		expect(fileEvents.map((e) => e.type)).toEqual(["meta"]);
+
+		// /permission 裸：报当前档（默认 workspace）
+		const bareRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
+			content: "/permission",
+		});
+		expect(bareRes.status).toBe(200);
+		const bareBody = (await bareRes.json()) as { reply: string };
+		expect(bareBody.reply).toContain("workspace");
+
+		// /permission readonly：切换 + 应答确认；GET 反映新档
+		const switchRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
+			content: "/permission readonly",
+		});
+		expect(switchRes.status).toBe(200);
+		const switchBody = (await switchRes.json()) as { reply: string };
+		expect(switchBody.reply).toContain("readonly");
+		const getRes = (await (
+			await fetch(`${fx.base}/api/sessions/${id}/permission`)
+		).json()) as { mode: string };
+		expect(getRes.mode).toBe("readonly");
+
+		// /permission bogus：400 列出有效值，消息不进回合
+		const bogusRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
+			content: "/permission bogus",
+		});
+		expect(bogusRes.status).toBe(400);
+		const bogusBody = (await bogusRes.json()) as { error: string };
+		expect(bogusBody.error).toContain("readonly, workspace, full");
+	}, 20000);
+});
 
 describe("settings 路由", () => {
 	it("GET 返回 models 与 mainAgentTier，$ENV 引用原文不插值", async () => {

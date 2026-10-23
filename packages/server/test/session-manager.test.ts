@@ -1,7 +1,7 @@
 // 会话管理器集成测试：turn 串行化、审批桥（parked promise）、seq/订阅广播、usage 统计。
 // 全部 scriptedAdapter 不触网；settings 用 mkdtemp home 下的三档夹具（provider 为不存在的
-// 测试值，resolveModel 兜底告警但 llm 注入模式下不真正解析）。审批场景用 ask-on-dangerous，
-// 无审批场景用 policy:"never" 且脚本不触发需要审批的工具。
+// 测试值，resolveModel 兜底告警但 llm 注入模式下不真正解析）。审批场景用 workspace，
+// 无审批场景用 permission.mode:"full" 且脚本不触发需要审批的工具。
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,14 +13,23 @@ import {
 	scriptedAdapter,
 	type Usage,
 } from "@hotpot/ai";
-import { loadSession, type SessionEvent, type Settings } from "@hotpot/core";
+import {
+	createSession as createDiskSession,
+	loadSession,
+	type PermissionMode,
+	type SessionEvent,
+	type Settings,
+} from "@hotpot/core";
 import type {
 	McpClientFactory,
 	McpClientHandle,
 	McpToolCallResult,
 } from "@hotpot/orchestrator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSessionManager } from "../src/session-manager.ts";
+import {
+	createSessionManager,
+	SessionApiError,
+} from "../src/session-manager.ts";
 import type { WireEvent } from "../src/wire.ts";
 
 let home: string;
@@ -48,10 +57,10 @@ const MODEL: ModelInfo = {
 };
 
 // 用户级 settings 夹具：三档指向不存在的 provider（resolveModel 会兜底并给 warning，
-// 但本测试一律注入 llm，不真正解析）；approval.policy 按场景传入；
+// 但本测试一律注入 llm，不真正解析）；permission.mode 按场景传入；
 // extra 可带 mcpServers/features（MCP 挂载用例）
 async function writeSettings(
-	policy?: "ask-on-dangerous" | "always" | "never",
+	mode?: PermissionMode,
 	extra?: {
 		mcpServers?: Settings["mcpServers"];
 		features?: Settings["features"];
@@ -63,7 +72,7 @@ async function writeSettings(
 			medium: { provider: "test-provider", model: "test-medium", apiKey: "mk" },
 			low: { provider: "test-provider", model: "test-low", apiKey: "lk" },
 		},
-		...(policy === undefined ? {} : { approval: { policy } }),
+		...(mode === undefined ? {} : { permission: { mode } }),
 		...(extra?.mcpServers === undefined
 			? {}
 			: { mcpServers: extra.mcpServers }),
@@ -162,7 +171,7 @@ function spawnSimpleRound(task: string): StreamEvent[] {
 
 describe("createSessionManager", () => {
 	it("send 后 sink 顺序：log(meta) → turn(start) → log(user_msg) → delta… → log(assistant_msg) → turn(end)", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const adapter: LlmAdapter = scriptedAdapter([
 			[
 				{ type: "text_delta", delta: "你好" },
@@ -198,7 +207,7 @@ describe("createSessionManager", () => {
 	});
 
 	it("spawn→simple：收到 spawn 瞬态事件；子 agent 事件只经 log 路径到达（迭代器未转发 tool_call）", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("读取 note.txt 并总结内容"),
 			toolCallRound("read", "w-tc-1", '{"path":"note.txt"}'),
@@ -257,7 +266,7 @@ describe("createSessionManager", () => {
 	});
 
 	it("bash 高危命令：sink 收到 approval；未应答期间 turn 不结束；allow 后收到 log(approval/asked→decided) 与 turn(end)", async () => {
-		await writeSettings("ask-on-dangerous");
+		await writeSettings("workspace");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("清理临时目录 x"),
 			toolCallRound("bash", "w-tc-1", '{"command":"rm -rf x"}'),
@@ -311,7 +320,7 @@ describe("createSessionManager", () => {
 	});
 
 	it("complex：plan(drafted) → answerPlan approve → plan(approved) → 执行 turn 完成", async () => {
-		await writeSettings("ask-on-dangerous");
+		await writeSettings("workspace");
 		const planV1 = `# Plan
 
 ## Steps
@@ -391,7 +400,7 @@ tests pass
 	});
 
 	it("两个 send 连发：turn 串行，第二回合的 user_msg 推送/落盘都在第一回合 turn(end) 之后", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const adapter = scriptedAdapter([
 			textRound("回答一", { input: 10, output: 5 }),
 			textRound("回答二", { input: 10, output: 5 }),
@@ -440,8 +449,59 @@ tests pass
 		expect(answer1File).toBeLessThan(msg2File);
 	});
 
+	it("运行中 send：进入 next-turn 排队并落 inbox/spliced，回合结束后作为 follow-up 回合执行", async () => {
+		await writeSettings("workspace");
+		const adapter = scriptedAdapter([
+			spawnSimpleRound("删除临时目录 y"),
+			toolCallRound("bash", "w-tc-1", '{"command":"rm -rf y"}'),
+			textRound("已删除。", { input: 50, output: 10 }),
+			textRound("临时目录已清理。", { input: 20, output: 5 }),
+			textRound("收到排队消息。", { input: 20, output: 5 }),
+		]);
+		const sm = createSessionManager({ home, llm: { adapter, model: MODEL } });
+		const rec = await sm.create(proj);
+		const { events, sink } = makeSink();
+		sm.subscribe(rec.id, null, sink);
+
+		await sm.send(rec.id, "清理临时目录");
+		await waitFor(() => events.some((e) => e.kind === "approval"));
+
+		// 运行中发送 = 排队：内存快照与 durable inbox/spliced 立即可见（web QueueBar 数据源）
+		await sm.send(rec.id, "排队消息");
+		expect(sm.inbox(rec.id).nextTurn.map((m) => m.content)).toEqual([
+			"排队消息",
+		]);
+		const queuedSpliced = events.filter(
+			(e) =>
+				isLog(e) &&
+				e.event.type === "inbox/spliced" &&
+				e.event.queue === "next-turn" &&
+				e.event.messages.some((m) => m.content === "排队消息"),
+		);
+		expect(queuedSpliced.length).toBeGreaterThan(0);
+
+		const approval = events.find((e) => e.kind === "approval");
+		if (approval?.kind !== "approval") throw new Error("approval 事件缺失");
+		expect(sm.answerToolApproval(rec.id, approval.requestId, "allow")).toBe(
+			true,
+		);
+
+		// 两个回合：当前回合结束后 follow-up 补发循环消费排队消息，作为新回合执行一次
+		await waitFor(() => events.filter(isTurnEnd).length === 2);
+		const queuedUserMsgs = events.filter(
+			(e) =>
+				isLog(e) &&
+				e.event.type === "user_msg" &&
+				e.event.agentId === "main" &&
+				e.event.content === "排队消息",
+		);
+		expect(queuedUserMsgs).toHaveLength(1);
+		// 消费即落盘：队列清空后恢复不会复活旧消息
+		expect(sm.inbox(rec.id).nextTurn).toEqual([]);
+	});
+
 	it("attachById：close 后恢复会话，tailer 补读历史经 buffer 重放拿到旧 assistant_msg，且可继续对话", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const sm = createSessionManager({
 			home,
 			llm: {
@@ -498,7 +558,7 @@ tests pass
 	});
 
 	it("空闲会话恢复订阅：agent_end 随日志重放到达，不再补发合成 turn(end)", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("读取 note.txt 并总结内容"),
 			toolCallRound("read", "w-tc-1", '{"path":"note.txt"}'),
@@ -541,7 +601,7 @@ tests pass
 	});
 
 	it("usage()：折叠 assistant_msg.usage，total/byTier/byAgent 正确", async () => {
-		await writeSettings("never");
+		await writeSettings("full");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("读取 note.txt 并总结内容"),
 			toolCallRound("read", "w-tc-1", '{"path":"note.txt"}'),
@@ -575,7 +635,171 @@ tests pass
 	});
 });
 
-// ---- M4 Feature⑦ MCP 挂载 ----
+// ---- M2：权限模式切换/恢复、队列变更、内置指令 ----
+
+describe("M2 权限与内置指令", () => {
+	it("setPermission：改写运行时持有者、落 permission/changed、瞬态 permission 事件在 durable log 之后广播", async () => {
+		await writeSettings("workspace");
+		const sm = createSessionManager({
+			home,
+			llm: { adapter: scriptedAdapter([]), model: MODEL },
+		});
+		const rec = await sm.create(proj);
+		expect(sm.permission(rec.id)).toBe("workspace");
+		const { events, sink } = makeSink();
+		sm.subscribe(rec.id, null, sink);
+
+		await sm.setPermission(rec.id, "full");
+		expect(sm.permission(rec.id)).toBe("full");
+
+		// 瞬态 permission 事件到达
+		const permissionIdx = events.findIndex(
+			(e) => e.kind === "permission" && e.mode === "full",
+		);
+		expect(permissionIdx).toBeGreaterThan(-1);
+		// 边界同步：durable 的 permission/changed 先经 log 路径到达
+		const logIdx = events.findIndex(
+			(e) => isLog(e) && e.event.type === "permission/changed",
+		);
+		expect(logIdx).toBeGreaterThan(-1);
+		expect(logIdx).toBeLessThan(permissionIdx);
+
+		// 落盘审计：mode + source
+		const { events: fileEvents } = await loadSession(rec.filePath);
+		const changed = fileEvents.find((e) => e.type === "permission/changed");
+		expect(changed).toMatchObject({ mode: "full", source: "user" });
+		await sm.close(rec.id);
+	});
+
+	it("恢复：attachById fold permission/changed（last-write-wins）还原用户切换的档位，覆盖 settings 默认", async () => {
+		await writeSettings("full");
+		const sm = createSessionManager({
+			home,
+			llm: { adapter: scriptedAdapter([]), model: MODEL },
+		});
+		const rec = await sm.create(proj);
+		await sm.setPermission(rec.id, "readonly");
+		await sm.setPermission(rec.id, "workspace");
+		await sm.close(rec.id);
+
+		// 新 manager 恢复（settings 是 full，最后用户切换是 workspace，应以 fold 为准）
+		const sm2 = createSessionManager({ home });
+		const attached = await sm2.attachById(rec.id);
+		if (attached === null) throw new Error("attachById 未命中");
+		expect(sm2.permission(attached.id)).toBe("workspace");
+		await sm2.close(attached.id);
+
+		// 无 permission/changed 记录的会话：回退 settings 默认
+		const rec2 = await sm.create(proj);
+		await sm.close(rec2.id);
+		const sm3 = createSessionManager({ home });
+		const attached2 = await sm3.attachById(rec2.id);
+		if (attached2 === null) throw new Error("attachById 未命中");
+		expect(sm3.permission(attached2.id)).toBe("full");
+		await sm3.close(attached2.id);
+	});
+
+	it("队列变更：steerQueued 移入 next-step（两队列各落全量快照）、removeQueued 移除、未命中 false", async () => {
+		await writeSettings("full");
+		// 种子会话：直接经 core 写一条 next-turn 全量快照（等价上次进程排队落盘），
+		// attachById 经 foldInbox 播种进内存队列
+		const disk = await createDiskSession(proj, home);
+		await disk.append({
+			type: "inbox/spliced",
+			id: "seed-1",
+			ts: new Date().toISOString(),
+			agentId: "main",
+			queue: "next-turn",
+			messages: [
+				{ id: "q-1", content: "第一条" },
+				{ id: "q-2", content: "第二条" },
+			],
+		});
+		const sm = createSessionManager({
+			home,
+			llm: { adapter: scriptedAdapter([]), model: MODEL },
+		});
+		const rec = await sm.attachById(disk.id);
+		if (rec === null) throw new Error("attachById 未命中");
+		expect(sm.inbox(rec.id).nextTurn.map((m) => m.id)).toEqual(["q-1", "q-2"]);
+
+		// steerQueued：next-turn → next-step，命中 true
+		expect(await sm.steerQueued(rec.id, "q-1")).toBe(true);
+		const snap = sm.inbox(rec.id);
+		expect(snap.nextTurn.map((m) => m.id)).toEqual(["q-2"]);
+		expect(snap.nextStep.map((m) => m.id)).toEqual(["q-1"]);
+
+		// 落盘：seed 快照 + steer 的两队列快照（last-write-wins 恢复所需）；
+		// steerQueued 先落 next-turn 再落 next-step
+		const { events: fileEvents } = await loadSession(rec.filePath);
+		const splices = fileEvents.filter((e) => e.type === "inbox/spliced");
+		expect(splices).toHaveLength(3);
+		const nextStepSnap = splices[2];
+		expect(nextStepSnap).toMatchObject({ queue: "next-step" });
+		expect(
+			nextStepSnap.type === "inbox/spliced"
+				? nextStepSnap.messages.map((m) => m.id)
+				: [],
+		).toEqual(["q-1"]);
+
+		// removeQueued：移除 next-turn 指定消息；重复移除/未知 id → false
+		expect(await sm.removeQueued(rec.id, "q-2")).toBe(true);
+		expect(await sm.removeQueued(rec.id, "q-2")).toBe(false);
+		expect(await sm.removeQueued(rec.id, "nope")).toBe(false);
+		expect(sm.inbox(rec.id).nextTurn).toEqual([]);
+		await sm.close(rec.id);
+	});
+
+	it("内置指令：/help 本地应答不落盘；/permission 裸查当前档、带参切换；非法参数抛 SessionApiError", async () => {
+		await writeSettings("full");
+		const sm = createSessionManager({
+			home,
+			llm: { adapter: scriptedAdapter([]), model: MODEL },
+		});
+		const rec = await sm.create(proj);
+		const { events, sink } = makeSink();
+		sm.subscribe(rec.id, null, sink);
+
+		// /help：200 应答，不进模型、不落盘（日志仍只有 meta），无 turn 事件
+		const help = await sm.send(rec.id, "/help");
+		expect(help.reply).toContain("/help");
+		expect(help.reply).toContain("/permission");
+		const { events: fileEvents } = await loadSession(rec.filePath);
+		expect(fileEvents.map((e) => e.type)).toEqual(["meta"]);
+		expect(events.some((e) => e.kind === "turn")).toBe(false);
+
+		// /permission 裸：报当前档
+		const bare = await sm.send(rec.id, "/permission");
+		expect(bare.reply).toContain("full");
+
+		// /permission <mode>：走统一切换路径（持有者 + durable + 广播）
+		const switched = await sm.send(rec.id, "/permission readonly");
+		expect(switched.reply).toContain("readonly");
+		expect(sm.permission(rec.id)).toBe("readonly");
+		const { events: fileEvents2 } = await loadSession(rec.filePath);
+		expect(
+			fileEvents2.some(
+				(e) =>
+					e.type === "permission/changed" &&
+					e.mode === "readonly" &&
+					e.source === "user",
+			),
+		).toBe(true);
+		expect(
+			events.some((e) => e.kind === "permission" && e.mode === "readonly"),
+		).toBe(true);
+
+		// /permission bogus：400（列出有效值）
+		await expect(sm.send(rec.id, "/permission bogus")).rejects.toThrow(
+			SessionApiError,
+		);
+		await expect(sm.send(rec.id, "/permission bogus")).rejects.toThrow(
+			/readonly, workspace, full/,
+		);
+		await sm.close(rec.id);
+	});
+});
+
 // 连接层全部打桩（mcpCreateClient 注入 stub client），不触真实 MCP server；
 // 钉死：装配期 attach + mcp/attached 落盘、失败 server 不阻塞、开关关闭不连接、
 // 桥接工具经 runtime.mcpTools 进 worker 注册表并可被回合真实调用
@@ -610,7 +834,7 @@ function mcpStubClient(
 
 describe("MCP 挂载（mcpServers 配置）", () => {
 	it("attach 成功逐个落盘 mcp/attached（server/transport/桥接工具名），close 关闭连接", async () => {
-		await writeSettings("never", {
+		await writeSettings("full", {
 			mcpServers: {
 				demo: { command: "demo-cmd", args: ["--fast"] },
 				web: {
@@ -659,7 +883,7 @@ describe("MCP 挂载（mcpServers 配置）", () => {
 	});
 
 	it("失败 server warn + 跳过，成功 server 仍 attach，装配不阻塞", async () => {
-		await writeSettings("never", {
+		await writeSettings("full", {
 			mcpServers: {
 				bad: { command: "bad-cmd" },
 				good: { command: "good-cmd" },
@@ -694,7 +918,7 @@ describe("MCP 挂载（mcpServers 配置）", () => {
 	});
 
 	it("features.mcp=false：不连接（工厂不被调用），无 mcp/attached 事件", async () => {
-		await writeSettings("never", {
+		await writeSettings("full", {
 			features: { mcp: false },
 			mcpServers: { demo: { command: "demo-cmd" } },
 		});
@@ -716,7 +940,7 @@ describe("MCP 挂载（mcpServers 配置）", () => {
 	});
 
 	it("桥接工具进 worker 注册表：回合内经 mcp__<server>__<tool> 真实调用 stub", async () => {
-		await writeSettings("never", {
+		await writeSettings("full", {
 			mcpServers: { demo: { command: "demo-cmd" } },
 		});
 		const demoClient = mcpStubClient([

@@ -14,7 +14,7 @@ M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会�
 - **审批桥**（`src/approvals.ts`）：`createApprovalBridge(notify)` 把审批询问转成「入 pending 表 → 广播 approval 事件 → 返回 parked promise」；`answer(requestId)` 按 id 应答，`answerPendingPlan` 应答唯一挂起的 plan 询问。
 - **usage 统计**（`src/usage.ts`）：`summarizeUsage(events)` 折叠 `assistant_msg.usage`，产出 total/byTier（含条数 count）/byAgent。
 - **会话管理器**（`src/session-manager.ts`）：`createSessionManager({home, llm?, warn?})`。
-  - 回合装配镜像 `cli/src/chat.ts` 的 runChat（tier 解析、审批链 + 审计落盘、policy=always 的 worker 工具预审批、`createRuntime` + `llm` 覆盖 `resolveModel`、`createInbox` + `foldInbox` 播种、followup 补发循环）；
+  - 回合装配镜像 `cli/src/chat.ts` 的 runChat（tier 解析、审批链 + 审计落盘——full 模式链头 `allowAllHandler`、其余模式挂桥 handler；`createPermissionModeDecorator` 权限动态分派的 worker 工具预审批、`createRuntime` + `llm` 覆盖 `resolveModel`、`createInbox` + `foldInbox` 播种、followup 补发循环）；
   - turn 串行化：每会话一条 `turnTail` promise 链，`send` 排队执行；
   - 事件转发架构规则：durable 事件只由 tailer 推 `log`；迭代器只转发瞬态 `delta`/`spawn`/`plan`，`done`/`error` 收敛为回合级一次 `turn(end)`；delta 前、plan 前与 `turn(end)` 前做 durable 水位同步（`wrapAppend` 计数 + `syncDurable`），plan 事件携带 `messageIds` 供 web 隐藏重复的计划正文；
   - 广播顺序不变量：每会话一条 emit 管道分配 seq，同步 fan-out 到各订阅者 FIFO（重放先于 live 到达）；
