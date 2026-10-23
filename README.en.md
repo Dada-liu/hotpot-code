@@ -143,3 +143,8 @@ The distribution package lives in `packages/hotpot-agent` and contains only `dis
 4. Manual local publish: run `npm login`, then `pnpm publish:npm`.
 
 `artifacts/` is a local tarball directory and is not committed. The published tarball contains only `dist/bin.js`, `dist/web/**`, `README.md` and `LICENSE`.
+
+## Known Issues (TODO)
+
+- **The composer cannot rebuild turn state after a missed-window full replay**: `turn(start/end)` are transient wire events that are never persisted, while the missed-window replay path (`loadSession`, see `subscribeResuming` in `packages/server/src/session-manager.ts`) only replays durable logs. Two failure shapes: 1) refreshing the page mid-turn in a busy session (events beyond the hub's 2000-entry retention window) leaves the client `turn` at its initial `idle` — the composer shows the normal send mode, so the user can neither cancel the running turn nor steer-inject input; 2) after missing `turn(end)` and falling out of the window, the client `turn` is stuck at `running` — the composer stays in steer/cancel mode and Enter injects into an already-finished turn. Fix direction: reconcile at subscribe time using `holder.running` as the authority, `hub.replay`-ing the missing `turn(start/end)` to that subscriber only (sink-only, mode B; cf. the removed synthetic `turn(end)` mechanism). Related gap: the plan-approval waiting state also relies on transient `plan`/`approval` events, so the approval entry does not recover after a missed-window replay while the server's parked promise is still waiting. Fix scheduled later.
+

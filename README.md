@@ -142,3 +142,8 @@ M5 已完成（本仓库部分）：`packages/telemetry` 匿名遥测客户端�
 4. 本地手动发布：先 `npm login`，再执行 `pnpm publish:npm`。
 
 `artifacts/` 是本地 tarball 目录，不提交。发布产物只包含 `dist/bin.js`、`dist/web/**`、`README.md` 与 `LICENSE`。
+
+## 已知问题（TODO）
+
+- **掉窗全量重连后 composer 的回合状态无法重建**：`turn(start/end)` 是瞬态 wire 事件不落盘，掉窗全量重放（`loadSession` 路径，见 `packages/server/src/session-manager.ts` 的 `subscribeResuming`）只重放 durable 日志。后果有二：① 繁忙会话（事件超出 hub 2000 条留存窗口）运行中刷新页面，客户端 `turn` 停在初始 `idle`——composer 显示普通发送模式，无法取消当前回合、输入也不会走 steer 注入；② 断线错过 `turn(end)` 且掉出窗口后，客户端 `turn` 卡在 `running`——composer 锁在 steer/取消模式，回车变成给已结束的回合注入。修复方向：订阅对账时以 `holder.running` 为权威，向本订阅者 `hub.replay` 合成缺失的 `turn(start/end)`（sink-only，模式 B，参考已移除的旧合成 `turn(end)` 机制）。关联缺口：plan 审批等待态同样依赖瞬态 `plan`/`approval` 事件，掉窗重连后审批入口不恢复（服务端 parked promise 仍在等待）。待排期修复。
+
