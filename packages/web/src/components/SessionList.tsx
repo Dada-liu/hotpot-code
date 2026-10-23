@@ -1,6 +1,8 @@
 // 左栏：Kimi 风窄边栏（logo + 新建会话大卡 + 会话列表 + 底部功能按钮区）。
-// 新建（cwd 可留空走服务端默认）、切换、创建时间展示；会话名超长由 CSS 省略号打点，
-// 打点才经 tooltip 展示全称，未截断不出；行尾下拉（hover 露出、展开时 ChevronDown 旋转，向左弹出）承载会话操作：
+// 新建（M4：弹小对话框填工作目录，留空走服务端默认；确认后进入 pending welcome，
+// 首条消息才带 cwd 真正创建——创建失败（如 cwd 不存在）的红字回显在 composer 上方）；
+// 切换、创建时间展示；会话名超长由 CSS 省略号打点，打点才经 tooltip 展示全称；
+// 行尾下拉（hover 露出、展开时 ChevronDown 旋转，向左弹出）承载会话操作：
 // 运行中只显示归档（结束回合并落盘，二次确认），空闲显示删除（二次确认）。
 // 底部功能按钮区：设置（弹设置弹窗，见 SettingsDialog）。
 
@@ -8,11 +10,20 @@ import { Archive, ChevronDown, Plus, Settings, Trash2 } from "lucide-react";
 import { type ReactElement, useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
 	Tooltip,
@@ -84,6 +95,15 @@ function SessionRow({
 				) : (
 					nameSpan
 				)}
+				{/* 工作目录一行小字（绝对路径长，直接打点省略） */}
+				<span
+					className={cn(
+						"block truncate text-[11px]",
+						active ? "text-primary-foreground/60" : "text-muted-foreground",
+					)}
+				>
+					{session.cwd}
+				</span>
 				<span
 					className={cn(
 						"mt-0.5 flex items-center gap-1.5 text-[11px]",
@@ -165,7 +185,8 @@ interface SessionListProps {
 	currentId: string | null;
 	nameFor: (s: SessionSummary) => string;
 	onSelect: (id: string) => void;
-	onCreate: () => void;
+	// cwd 可选：新建对话框填写的工作目录，留空/undefined = 服务端默认
+	onCreate: (cwd?: string) => void;
 	onDelete: (id: string) => void;
 	onArchive: (id: string) => void;
 	onOpenSettings: () => void;
@@ -181,6 +202,15 @@ export function SessionList({
 	onArchive,
 	onOpenSettings,
 }: SessionListProps): ReactElement {
+	// 新建会话对话框：填工作目录 → 确认进入 pending welcome（首条消息才真正创建）
+	const [createOpen, setCreateOpen] = useState(false);
+	const [cwdDraft, setCwdDraft] = useState("");
+	const submitCreate = (): void => {
+		setCreateOpen(false);
+		const cwd = cwdDraft.trim();
+		setCwdDraft("");
+		onCreate(cwd === "" ? undefined : cwd);
+	};
 	return (
 		<aside className="flex h-full w-60 shrink-0 flex-col border-r bg-secondary/60">
 			<div className="flex items-center gap-2 px-4 pb-1 pt-4">
@@ -195,7 +225,9 @@ export function SessionList({
 				<Button
 					variant="outline"
 					className="w-full justify-start gap-2 rounded-xl border-border-strong bg-background py-5 hover:bg-accent"
-					onClick={onCreate}
+					onClick={() => {
+						setCreateOpen(true);
+					}}
 				>
 					<Plus className="size-4" />
 					新建会话
@@ -234,6 +266,42 @@ export function SessionList({
 					设置
 				</Button>
 			</div>
+			{/* 新建会话：指定工作目录（cwd），留空 = 服务端默认；创建在首条消息时发生 */}
+			<Dialog open={createOpen} onOpenChange={setCreateOpen}>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>新建会话</DialogTitle>
+						<DialogDescription>
+							可指定工作目录（cwd）；留空则使用服务器默认目录。目录必须已存在。
+						</DialogDescription>
+					</DialogHeader>
+					<Input
+						value={cwdDraft}
+						onChange={(e) => {
+							setCwdDraft(e.target.value);
+						}}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") {
+								e.preventDefault();
+								submitCreate();
+							}
+						}}
+						placeholder="/path/to/workspace（留空使用服务器默认目录）"
+						autoFocus
+					/>
+					<DialogFooter>
+						<Button
+							variant="ghost"
+							onClick={() => {
+								setCreateOpen(false);
+							}}
+						>
+							取消
+						</Button>
+						<Button onClick={submitCreate}>新建</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</aside>
 	);
 }

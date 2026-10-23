@@ -13,6 +13,7 @@ import type {
 	ContentBlock,
 	InboxMessage,
 	InboxSnapshot,
+	PermissionMode,
 	SessionEvent,
 	TodoItem,
 	WireEvent,
@@ -111,6 +112,8 @@ export interface ChatState {
 	usage: UsageTotals;
 	// steer/queue 两队列（inbox/spliced 折叠；REST 快照可覆盖修正消费后的残留）
 	inbox: InboxSnapshot;
+	// M3 权限模式：wire permission 事件与 GET /permission 种子值折叠到此（默认 workspace）
+	permissionMode: PermissionMode;
 	// agent 任务清单：todo/set 全量快照按 agentId 折叠（last-write-wins），
 	// 右侧面板卡片在状态栏下方实时渲染
 	todosByAgent: Record<string, TodoItem[]>;
@@ -135,6 +138,7 @@ export function createInitialState(): ChatState {
 		turn: "idle",
 		usage: { total: { input: 0, output: 0 }, byTier: {} },
 		inbox: { nextTurn: [], nextStep: [] },
+		permissionMode: "workspace",
 		todosByAgent: {},
 		hiddenPlanMessageIds: [],
 		seenEventIds: [],
@@ -174,6 +178,9 @@ export type ChatAction =
 	| { type: "event"; event: WireEvent }
 	| { type: "inbox"; snapshot: InboxSnapshot }
 	| { type: "reset" }
+	// M3 权限模式本地写入：进入会话时以 GET /permission（权威）为种子，
+	// 切换器乐观更新也走这里（失败由 App 回填旧值）
+	| { type: "permission"; mode: PermissionMode }
 	| {
 			type: "approval-answered";
 			requestId: string;
@@ -189,6 +196,8 @@ export function reduceChatAction(
 			return createInitialState();
 		case "inbox":
 			return applyInboxSnapshot(state, action.snapshot);
+		case "permission":
+			return { ...state, permissionMode: action.mode };
 		case "approval-answered":
 			// 应答已送达服务端：与 decided 日志走同一折叠路径立即关闭审批框，
 			// 不等 SSE 往返；服务端 decided 日志随后到达时幂等
@@ -287,6 +296,9 @@ export function reduce(state: ChatState, event: WireEvent): ChatState {
 		}
 		case "plan":
 			return reducePlan(state, event);
+		case "permission":
+			// M3 权限模式切换瞬态：直接折叠当前档位（durable permission/changed 仅审计）
+			return { ...state, permissionMode: event.mode };
 		case "spawn":
 			return {
 				...state,
@@ -499,12 +511,14 @@ function reduceLog(state: ChatState, event: SessionEvent): ChatState {
 					[event.agentId]: event.todos,
 				},
 			};
-		// M4 新增事件：与主对话渲染无关（hook/skill/prompt/mcp 由遥测与审计消费），
+		// M3/M4 新增事件：与主对话渲染无关（hook/skill/prompt/mcp 由遥测与审计消费；
+		// permission/changed 为权限切换审计，档位由 wire permission 瞬态折叠），
 		// 幂等去重已在函数入口完成
 		case "hook/fired":
 		case "skill/loaded":
 		case "prompt/invoked":
 		case "mcp/attached":
+		case "permission/changed":
 			return state;
 		case "error": {
 			const entry: TranscriptEntry = {

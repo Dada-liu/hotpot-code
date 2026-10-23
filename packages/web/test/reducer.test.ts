@@ -994,6 +994,57 @@ describe("inbox 队列（M4）", () => {
 	});
 });
 
+// M3：权限模式——wire permission 瞬态折叠档位；permission/changed 仅审计不渲染
+describe("reduce：权限模式（M3）", () => {
+	it("createInitialState 默认 workspace；wire permission 事件折叠档位", () => {
+		let state = createInitialState();
+		expect(state.permissionMode).toBe("workspace");
+
+		state = reduce(state, { seq: 1, kind: "permission", mode: "readonly" });
+		expect(state.permissionMode).toBe("readonly");
+
+		state = reduce(state, { seq: 2, kind: "permission", mode: "full" });
+		expect(state.permissionMode).toBe("full");
+	});
+
+	it("permission/changed 日志仅审计：不落 transcript、不改档位，幂等去重", () => {
+		let state = createInitialState();
+		state = reduce(state, { seq: 1, kind: "permission", mode: "full" });
+		state = reduce(
+			state,
+			log(2, {
+				type: "permission/changed",
+				id: "perm-1",
+				ts,
+				mode: "full",
+				source: "user",
+			}),
+		);
+		expect(state.transcript).toEqual([]);
+		expect(state.permissionMode).toBe("full");
+		expect(state.seenEventIds).toContain("perm-1");
+
+		// 同 id 重放不重复记录
+		state = reduce(
+			state,
+			log(3, {
+				type: "permission/changed",
+				id: "perm-1",
+				ts,
+				mode: "readonly",
+				source: "settings",
+			}),
+		);
+		expect(state.seenEventIds.filter((id) => id === "perm-1")).toHaveLength(1);
+	});
+
+	it("本地 action permission：GET /permission 种子值与切换器乐观更新共用路径", () => {
+		let state = createInitialState();
+		state = reduceChatAction(state, { type: "permission", mode: "readonly" });
+		expect(state.permissionMode).toBe("readonly");
+	});
+});
+
 describe("reduceChatAction：本地审批应答", () => {
 	// 构造带 pendingApproval 的状态（wire approval 事件登记）
 	function stateWithPendingApproval(requestId: string) {

@@ -25,6 +25,30 @@ export interface TodoItem {
 	status: "pending" | "in_progress" | "completed";
 }
 
+// M3 权限模式（core PermissionMode 的镜像）：readonly 读放行 / workspace 危险操作询问 / full 全放行
+export type PermissionMode = "readonly" | "workspace" | "full";
+
+// POST /:id/uploads 响应：上传后的绝对路径（消息内以 @<path> 引用）
+export interface UploadResponse {
+	path: string;
+}
+
+// GET /:id/fs/ls 目录项：path 为绝对路径（kind 只有 file|dir）
+export interface FsEntry {
+	name: string;
+	path: string;
+	kind: "file" | "dir";
+}
+
+// GET /:id 会话详情响应（UI 用到的字段子集；M3 起带权限模式初始档位）
+export interface SessionDetail {
+	id: string;
+	cwd: string;
+	createdAt: string;
+	turn: "running" | "idle";
+	permissionMode: PermissionMode;
+}
+
 // 会话事件（SessionEvent 联合的镜像子集）
 export type SessionEvent =
 	// meta 是文件首行，无 id/ts
@@ -110,6 +134,14 @@ export type SessionEvent =
 			agentId: string;
 			queue: "next-turn" | "next-step";
 			messages: InboxMessage[];
+	  }
+	// M3 权限模式切换审计：仅审计与恢复用，UI 不渲染（与 hook/fired 同待遇）
+	| {
+			type: "permission/changed";
+			id: string;
+			ts: string;
+			mode: PermissionMode;
+			source: "user" | "settings";
 	  }
 	// M4 新增事件（与 core/src/session/events.ts 逐字段一致；UI 不渲染，按 id 去重即可）
 	| {
@@ -199,4 +231,10 @@ export type WireEvent =
 			summary: string;
 			detail?: string;
 			plan?: string;
+	  }
+	// M3 权限模式切换瞬态：落在 durable permission/changed 之后到达
+	| {
+			seq: number;
+			kind: "permission";
+			mode: PermissionMode;
 	  };

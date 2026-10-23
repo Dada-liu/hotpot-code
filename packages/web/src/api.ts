@@ -1,9 +1,14 @@
 // REST client：与 server/src/app.ts 的路由契约一一对应。
 // 错误统一抛出带服务端 message 的 Error，由调用方（App）兜底展示。
 
-import type { InboxSnapshot } from "./protocol.ts";
+import type {
+	FsEntry,
+	InboxSnapshot,
+	PermissionMode,
+	UploadResponse,
+} from "./protocol.ts";
 
-export type { InboxSnapshot } from "./protocol.ts";
+export type { FsEntry, InboxSnapshot, PermissionMode } from "./protocol.ts";
 
 export interface SessionSummary {
 	id: string;
@@ -25,9 +30,11 @@ export interface UsageSummary {
 }
 
 // GET /api/sessions/:id/prompts 的响应项（M4 prompt templates）
+// M3：builtin 标记区分内置指令（/help、/permission）与 prompt templates，`/` 菜单据此分组
 export interface PromptInfo {
 	name: string;
 	description: string;
+	builtin: boolean;
 }
 
 // 非 2xx 统一抛出带服务端 message 的 Error；2xx 直接返回（不读响应体）
@@ -62,6 +69,20 @@ function post(path: string, body?: unknown): Promise<unknown> {
 	});
 }
 
+function put(path: string, body: unknown): Promise<unknown> {
+	return request(path, {
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body),
+	});
+}
+
+// DELETE 常无响应体（204）：只走状态检查，失败抛出带服务端 message 的 Error
+async function del(path: string): Promise<void> {
+	const res = await fetch(path, { method: "DELETE" });
+	await ensureOk(res);
+}
+
 export async function listSessions(): Promise<SessionSummary[]> {
 	const body = (await request("/api/sessions")) as {
 		sessions: SessionSummary[];
@@ -92,13 +113,18 @@ export async function archiveSession(sessionId: string): Promise<void> {
 	await post(`/api/sessions/${encodeURIComponent(sessionId)}/archive`);
 }
 
+// POST messages：普通输入 202（消息挂进 turn 串行链，响应体 {}）；
+// 内置指令命中 200 {reply}——回复由客户端渲染本地 notice 气泡，不进对话流
 export async function sendMessage(
 	sessionId: string,
 	content: string,
-): Promise<void> {
-	await post(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-		content,
-	});
+): Promise<{ reply?: string }> {
+	return (await post(
+		`/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+		{
+			content,
+		},
+	)) as { reply?: string };
 }
 
 export async function steerMessage(
@@ -153,6 +179,68 @@ export async function getInbox(sessionId: string): Promise<InboxSnapshot> {
 	return (await request(
 		`/api/sessions/${encodeURIComponent(sessionId)}/inbox`,
 	)) as InboxSnapshot;
+}
+
+// M3 权限模式：GET 是权威（服务端重启后 fold permission/changed 恢复最后档位）
+export async function getPermission(
+	sessionId: string,
+): Promise<PermissionMode> {
+	const body = (await request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/permission`,
+	)) as { mode: PermissionMode };
+	return body.mode;
+}
+
+export async function setPermission(
+	sessionId: string,
+	mode: PermissionMode,
+): Promise<void> {
+	await put(`/api/sessions/${encodeURIComponent(sessionId)}/permission`, {
+		mode,
+	});
+}
+
+// M3 队列变更：next-turn 消息点击转 steer 注入（409 回合未运行 / 404 未命中）
+export async function steerQueued(
+	sessionId: string,
+	messageId: string,
+): Promise<void> {
+	await post(
+		`/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(messageId)}/steer`,
+	);
+}
+
+// M3 队列变更：移除 next-turn 排队消息（404 未命中）
+export async function removeQueued(
+	sessionId: string,
+	messageId: string,
+): Promise<void> {
+	await del(
+		`/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(messageId)}`,
+	);
+}
+
+// M3 文本附件上传：立即上传拿绝对路径，发送时以 @<path> 追加进消息文本
+export async function uploadFile(
+	sessionId: string,
+	name: string,
+	content: string,
+): Promise<UploadResponse> {
+	return (await post(`/api/sessions/${encodeURIComponent(sessionId)}/uploads`, {
+		name,
+		content,
+	})) as UploadResponse;
+}
+
+// M3 @ 补全：列会话工作区目录直接子级（dirPart 为相对目录，"" = cwd 自身）
+export async function listFs(
+	sessionId: string,
+	dir: string,
+): Promise<FsEntry[]> {
+	const body = (await request(
+		`/api/sessions/${encodeURIComponent(sessionId)}/fs/ls?path=${encodeURIComponent(dir)}`,
+	)) as { entries: FsEntry[] };
+	return body.entries;
 }
 
 // GET/PUT /api/settings 的模型设置视图（server settings-store.ts 的 ModelSettingsView 镜像）

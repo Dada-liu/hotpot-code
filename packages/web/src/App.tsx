@@ -16,12 +16,15 @@ import {
 	createSession,
 	deleteSession,
 	getInbox,
+	getPermission,
 	listPrompts,
 	listSessions,
 	type PromptInfo,
+	removeQueued,
 	type SessionSummary,
 	sendMessage,
-	steerMessage,
+	setPermission,
+	steerQueued,
 } from "./api.ts";
 import { AgentPanel } from "./components/AgentPanel.tsx";
 import { ChatView } from "./components/ChatView.tsx";
@@ -63,6 +66,8 @@ export function App() {
 	const [currentId, setCurrentId] = useState<string | null>(null);
 	// 点“新建会话”后进入待创建态：不立刻建会话，首条消息发送时才创建
 	const [pending, setPending] = useState(false);
+	// 待创建态选择的工作目录（新建会话对话框；null = 服务端默认 cwd）
+	const [pendingCwd, setPendingCwd] = useState<string | null>(null);
 	const [names, setNames] = useState<Record<string, string>>(loadSessionNames);
 	const [chat, dispatch] = useReducer(
 		reduceChatAction,
@@ -71,6 +76,14 @@ export function App() {
 	);
 	const [connState, setConnState] = useState<ConnectionState | "idle">("idle");
 	const [error, setError] = useState<string | null>(null);
+	// 内置指令（/help、/permission）的本地回复气泡：不落盘，会话切换清空
+	const [notices, setNotices] = useState<string[]>([]);
+	// 首条消息创建会话失败（如 cwd 400）：composer 上方红字
+	const [createError, setCreateError] = useState<string | null>(null);
+	// 权限切换在途：选择器禁用，防重复提交
+	const [permissionBusy, setPermissionBusy] = useState(false);
+	// 队列行操作在途：steer/移除单飞
+	const [queueBusy, setQueueBusy] = useState(false);
 	// 审批应答提交中：单飞锁 + 审批条按钮 loading，防重复点击产生二次应答 404
 	const [approvalBusy, setApprovalBusy] = useState(false);
 	// M4 Feature⑤：当前会话可用的 prompt templates（`/` 补全）
@@ -105,6 +118,9 @@ export function App() {
 	const [connEpoch, setConnEpoch] = useState(0);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: connEpoch 是强制重建连接的计数信号，刻意不读具体值
 	useEffect(() => {
+		// 切换会话/回欢迎态：本地 notice 与创建错误不跨会话
+		setNotices([]);
+		setCreateError(null);
 		if (currentId === null) {
 			setConnState("idle");
 			setPrompts([]);
@@ -115,6 +131,14 @@ export function App() {
 			.then(setPrompts)
 			.catch(() => {
 				setPrompts([]);
+			});
+		// 权限档位以服务端为权威（重启后 fold permission/changed 恢复最后选择）
+		void getPermission(currentId)
+			.then((mode) => {
+				dispatch({ type: "permission", mode });
+			})
+			.catch(() => {
+				// 拉取失败保持默认 workspace；wire permission 事件仍可校正
 			});
 		// 队列初始快照（web 重连/切换会话后恢复展示）
 		void refreshInbox(currentId);
@@ -140,10 +164,15 @@ export function App() {
 		}
 	}, [currentId, chat.turn, refreshInbox]);
 
-	const handleCreate = (): void => {
-		// Kimi 式延迟创建：直接清空对话区进入欢迎态，首条消息发送时才真正建会话
+	const handleCreate = (cwd?: string): void => {
+		// Kimi 式延迟创建：直接清空对话区进入欢迎态，首条消息发送时才真正建会话。
+		// 新建会话对话框可选填工作目录（留空 = 服务端默认 cwd），随首条消息一起创建
+		const normalized = cwd?.trim() ?? "";
+		setPendingCwd(normalized === "" ? null : normalized);
 		setCurrentId(null);
 		setPending(true);
+		setNotices([]);
+		setCreateError(null);
 		dispatch({ type: "reset" });
 		setError(null);
 	};
@@ -196,13 +225,21 @@ export function App() {
 		}
 	};
 
-	// 空闲发送 = 新 turn（POST messages）；运行中发送 = steer 注入（POST steer）
+	// 空闲发送 = 新 turn；运行中发送 = 排队（next-turn，服务端写 inbox/spliced，
+	// QueueBar 立即展示；点击队列条目才转 steer）。内置指令命中返回 200 {reply}，
+	// 只追加本地 notice 气泡，不进入回合
 	const handleSend = async (content: string): Promise<void> => {
 		try {
-			// 待创建态：首条消息先到——创建会话、以提示词命名、加入列表并连接
-			// 无会话（初始欢迎态或点“新建会话”的待创建态）：首条消息先创建会话、以提示词命名、加入列表并连接
+			// 待创建态：首条消息先到——带待选 cwd 创建会话、以提示词命名、加入列表并连接
 			if (currentId === null) {
-				const id = await createSession();
+				let id: string;
+				try {
+					id = await createSession(pendingCwd ?? undefined);
+				} catch (e) {
+					// cwd 校验失败（400）等：停在欢迎态，红字提示，可改工作目录后重试
+					setCreateError(errorMessage(e));
+					return;
+				}
 				setNames((prev) => {
 					const next = { ...prev, [id]: sessionNameFromPrompt(content) };
 					localStorage.setItem(SESSION_NAMES_KEY, JSON.stringify(next));
@@ -210,19 +247,29 @@ export function App() {
 				});
 				setCurrentId(id);
 				setPending(false);
+				setPendingCwd(null);
+				setCreateError(null);
 				await refreshSessions();
-				await sendMessage(id, content);
-				setSessions((ss) =>
-					ss.map((s) => (s.id === id ? { ...s, turn: "running" as const } : s)),
-				);
+				const result = await sendMessage(id, content);
+				if (result.reply != null) {
+					setNotices((n) => [...n, result.reply as string]);
+				} else {
+					setSessions((ss) =>
+						ss.map((s) =>
+							s.id === id ? { ...s, turn: "running" as const } : s,
+						),
+					);
+				}
 				setError(null);
 				return;
 			}
-			if (chat.turn === "running") {
-				await steerMessage(currentId, content);
+			const result = await sendMessage(currentId, content);
+			if (result.reply != null) {
+				setNotices((n) => [...n, result.reply as string]);
+			} else if (chat.turn === "running") {
+				// 已排队：inbox/spliced 随 SSE 到达，快照刷新兜底修正
 				void refreshInbox(currentId);
 			} else {
-				await sendMessage(currentId, content);
 				setSessions((ss) =>
 					ss.map((s) =>
 						s.id === currentId ? { ...s, turn: "running" as const } : s,
@@ -232,6 +279,63 @@ export function App() {
 			setError(null);
 		} catch (e) {
 			setError(errorMessage(e));
+		}
+	};
+
+	// 权限档位切换：乐观写入 + 服务端权威校正（wire permission 事件覆写）；失败回填
+	const handlePermissionChange = async (
+		mode: "readonly" | "workspace" | "full",
+	): Promise<void> => {
+		if (currentId === null || permissionBusy) {
+			return;
+		}
+		const previous = chat.permissionMode;
+		if (previous === mode) {
+			return;
+		}
+		dispatch({ type: "permission", mode });
+		setPermissionBusy(true);
+		try {
+			await setPermission(currentId, mode);
+			setError(null);
+		} catch (e) {
+			dispatch({ type: "permission", mode: previous });
+			setError(errorMessage(e));
+		} finally {
+			setPermissionBusy(false);
+		}
+	};
+
+	// 排队条目点击转 steer：仅运行中可用（服务端 409 时保留条目并提示）
+	const handleSteerQueued = async (messageId: string): Promise<void> => {
+		if (currentId === null || queueBusy) {
+			return;
+		}
+		setQueueBusy(true);
+		try {
+			await steerQueued(currentId, messageId);
+			await refreshInbox(currentId);
+			setError(null);
+		} catch (e) {
+			setError(errorMessage(e));
+		} finally {
+			setQueueBusy(false);
+		}
+	};
+
+	const handleRemoveQueued = async (messageId: string): Promise<void> => {
+		if (currentId === null || queueBusy) {
+			return;
+		}
+		setQueueBusy(true);
+		try {
+			await removeQueued(currentId, messageId);
+			await refreshInbox(currentId);
+			setError(null);
+		} catch (e) {
+			setError(errorMessage(e));
+		} finally {
+			setQueueBusy(false);
 		}
 	};
 
@@ -320,9 +424,15 @@ export function App() {
 					<header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
 						<span
 							className="min-w-0 flex-1 truncate text-sm text-muted-foreground"
-							title={current?.cwd}
+							title={current?.cwd ?? pendingCwd ?? undefined}
 						>
-							{current ? currentName : pending ? "新会话" : "hotpot-agent"}
+							{current
+								? currentName
+								: pending
+									? pendingCwd === null
+										? "新会话"
+										: `新会话 · ${pendingCwd}`
+									: "hotpot-agent"}
 						</span>
 						<span
 							className={cn(
@@ -355,6 +465,21 @@ export function App() {
 						hasSession={currentId !== null}
 						welcome={currentId === null}
 						prompts={prompts}
+						notices={notices}
+						createError={createError}
+						sessionId={currentId}
+						permissionMode={chat.permissionMode}
+						permissionBusy={permissionBusy}
+						onPermissionChange={(mode) => {
+							void handlePermissionChange(mode);
+						}}
+						queueBusy={queueBusy}
+						onSteerQueued={(messageId) => {
+							void handleSteerQueued(messageId);
+						}}
+						onRemoveQueued={(messageId) => {
+							void handleRemoveQueued(messageId);
+						}}
 						onSend={(content) => {
 							void handleSend(content);
 						}}
