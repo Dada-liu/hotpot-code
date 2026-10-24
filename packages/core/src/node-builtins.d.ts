@@ -41,11 +41,22 @@ declare module "node:fs/promises" {
 		path: string,
 		options?: { recursive?: boolean; force?: boolean },
 	): Promise<void>;
+	// 工作区创建：canonical 路径解析 + 目录校验
+	export function stat(
+		path: string,
+	): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+	export function realpath(path: string): Promise<string>;
+	// 工作区注册表原子写盘：tmp 写完后覆盖目标文件
+	export function rename(oldPath: string, newPath: string): Promise<void>;
+	// 测试夹具：symlink 指向同一目录，验证 canonical 去重
+	export function symlink(target: string, path: string): Promise<void>;
 }
 
 declare module "node:fs" {
 	export function existsSync(path: string): boolean;
 	export function readFileSync(path: string, encoding: "utf8"): string;
+	// findByPath 是同步方法，需要同步 realpath
+	export function realpathSync(path: string): string;
 }
 
 declare module "node:child_process" {
@@ -95,6 +106,7 @@ declare module "node:path" {
 	export function join(...parts: string[]): string;
 	export function resolve(...parts: string[]): string;
 	export function dirname(path: string): string;
+	export function isAbsolute(path: string): boolean;
 }
 
 declare module "node:crypto" {

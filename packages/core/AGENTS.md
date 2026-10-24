@@ -1,6 +1,6 @@
 # Working in packages/core/
 
-- Source in `src/` with one subdirectory per feature: `agent/`, `approval/`, `config/`, `frontmatter/`, `hooks/`, `prompt/`, `prompt-templates/`, `session/`, `skills/`, `tools/`. Each feature folder has `index.ts` (barrel), implementation files, `README.md` (Chinese) and `AGENTS.md` (English). `src/index.ts` is the package entry (re-exports only); `node-builtins.d.ts` holds ambient declarations. Tests in `test/*.test.ts`.
+- Source in `src/` with one subdirectory per feature: `agent/`, `approval/`, `config/`, `frontmatter/`, `hooks/`, `prompt/`, `prompt-templates/`, `session/`, `skills/`, `tools/`, `workspace/`. Each feature folder has `index.ts` (barrel), implementation files, `README.md` (Chinese) and `AGENTS.md` (English). `src/index.ts` is the package entry (re-exports only); `node-builtins.d.ts` holds ambient declarations. Tests in `test/*.test.ts`.
 - May depend on `@hotpot/ai` (`workspace:*`) and whitelisted runtime deps (`zod`); never import from `@hotpot/cli`.
 - The session JSONL event log is the single source of truth — UI-facing state must be derivable via `deriveMessages`; do not introduce parallel mutable state.
 - Home resolution (`resolveHome` in `session/store.ts`) is shared by sessions and `config/config.ts` (`loadSettings`): param > `HOTPOT_HOME` env > `~/.hotpot`. Reuse it, don't duplicate the rule. Settings merge user-level (`~/.hotpot/settings.json`, required, models + credentials) with optional project-level (`.hotpot/settings.json` walked up from `cwd`, whitelist fields only).

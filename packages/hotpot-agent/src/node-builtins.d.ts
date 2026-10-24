@@ -82,6 +82,8 @@ declare module "node:fs/promises" {
 	): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
 	// 工作区浏览 realpath 解析（逃逸校验用）
 	export function realpath(path: string): Promise<string>;
+	// 工作区注册表（core）原子写盘
+	export function rename(oldPath: string, newPath: string): Promise<void>;
 }
 
 declare module "node:fs" {
@@ -91,6 +93,8 @@ declare module "node:fs" {
 		isFile(): boolean;
 	};
 	export function readFileSync(path: string, encoding: "utf8"): string;
+	// 工作区 findByPath 是同步方法
+	export function realpathSync(path: string): string;
 	// 遥测包（install-id）经 workspace 源码直引，这里补上它用到的同步写 API
 	export function writeFileSync(
 		path: string,
@@ -153,6 +157,7 @@ declare module "node:path" {
 	export function resolve(...parts: string[]): string;
 	export function dirname(path: string): string;
 	export function extname(path: string): string;
+	export function isAbsolute(path: string): boolean;
 	export const sep: string;
 }
 

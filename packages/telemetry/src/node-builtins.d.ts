@@ -41,11 +41,19 @@ declare module "node:fs/promises" {
 		path: string,
 		options?: { recursive?: boolean; force?: boolean },
 	): Promise<void>;
+	// 工作区注册表（core）编译进本包：realpath/stat 校验目录，rename 原子替换存储
+	export function stat(
+		path: string,
+	): Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+	export function realpath(path: string): Promise<string>;
+	export function rename(oldPath: string, newPath: string): Promise<void>;
 }
 
 declare module "node:fs" {
 	export function existsSync(path: string): boolean;
 	export function readFileSync(path: string, encoding: "utf8"): string;
+	// 工作区 findByPath 是同步方法
+	export function realpathSync(path: string): string;
 	export function writeFileSync(
 		path: string,
 		data: string,
@@ -103,6 +111,7 @@ declare module "node:path" {
 	export function join(...parts: string[]): string;
 	export function resolve(...parts: string[]): string;
 	export function dirname(path: string): string;
+	export function isAbsolute(path: string): boolean;
 }
 
 declare module "node:crypto" {

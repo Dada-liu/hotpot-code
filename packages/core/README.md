@@ -45,3 +45,10 @@ agent 内核，不依赖任何 UI。
 - **skill**（`src/skills/skills.ts`）：递归扫描 `SKILL.md`，最小 frontmatter 解析（`src/frontmatter/frontmatter.ts`，与 prompt templates 共用），只产出 name/description/path 清单。
 - **prompt templates**（`src/prompt-templates/prompt-templates.ts`）：`*.md` → `/命令`，支持 `$ARGUMENTS`/`$1..$9`；展开由 CLI / server 负责，落 `prompt/invoked`。
 - **设置扩展**（`src/config/config.ts`）：`features.*` 开关、`hooks`、`webSearch`、`mcpServers`、`skillsDirs`、`promptsDirs` 均仅用户级（安全理由见 schema 注释）；`featureEnabled` 为统一读取口（默认全开）。
+
+## M6 工作区注册表
+
+- **workspace**（`src/workspace/workspace.ts`）：`openWorkspaceRegistry({ home })` 读 `<home>/workspaces.json`（`{ version: 1, workspaces }`，缺文件为空态，损坏报 `invalid-storage`），写盘 tmp + rename 原子替换。
+- 工作区是持久化实体（UUID、canonical `realpath`、默认标题取目录名、有序 `sessionIds`）；创建按 canonical 路径去重并插到列表头部，`reorder` 只接受完整排列。
+- 会话归属单值：`attachSession` 先移出其它工作区再追加，`detachSession` 全局移除；`findByPath`/`workspaceForSession` 提供归属查询。错误统一为带 `code` 的 `WorkspaceError`。
+
