@@ -17,6 +17,22 @@ export interface SessionSummary {
 	turn: "running" | "idle";
 }
 
+// 工作区注册表记录（server 原样返回）：sessionIds 数组顺序即组内展示顺序
+export interface WorkspaceWire {
+	id: string;
+	path: string;
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+	sessionIds: string[];
+}
+
+// POST /api/workspaces 响应：重复路径返回既有记录（created=false）
+export interface WorkspaceCreateResult {
+	workspace: WorkspaceWire;
+	created: boolean;
+}
+
 // GET /api/sessions/:id/usage 的响应镜像（server usage.ts UsageSummary 的子集）
 export interface UsageSummary {
 	total: { input: number; output: number };
@@ -90,11 +106,98 @@ export async function listSessions(): Promise<SessionSummary[]> {
 	return body.sessions;
 }
 
-export async function createSession(cwd?: string): Promise<string> {
-	const body = (await post(
-		"/api/sessions",
-		cwd === undefined ? {} : { cwd },
-	)) as {
+// 工作区注册表：数组顺序即侧栏展示顺序，新建插到头部
+export async function listWorkspaces(): Promise<WorkspaceWire[]> {
+	const body = (await request("/api/workspaces")) as {
+		workspaces: WorkspaceWire[];
+	};
+	return body.workspaces;
+}
+
+export async function createWorkspace(
+	path: string,
+): Promise<WorkspaceCreateResult> {
+	return (await post("/api/workspaces", { path })) as WorkspaceCreateResult;
+}
+
+export async function renameWorkspace(
+	id: string,
+	title: string,
+): Promise<WorkspaceWire> {
+	const body = (await request(`/api/workspaces/${encodeURIComponent(id)}`, {
+		method: "PATCH",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ title }),
+	})) as { workspace: WorkspaceWire };
+	return body.workspace;
+}
+
+// DELETE 无响应体（204）：只走状态检查
+export async function deleteWorkspace(id: string): Promise<void> {
+	await del(`/api/workspaces/${encodeURIComponent(id)}`);
+}
+
+// 排序必须覆盖全部现有 id（服务端校验完整排列）
+export async function reorderWorkspaces(
+	ids: string[],
+): Promise<WorkspaceWire[]> {
+	const body = (await put("/api/workspaces/order", { ids })) as {
+		workspaces: WorkspaceWire[];
+	};
+	return body.workspaces;
+}
+
+// 无原生目录后端（501 / code=picker-unavailable）：UI 据此降级为手填路径
+export class PickerUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PickerUnavailableError";
+	}
+}
+
+// 选择器错误体 {code, error}：501 与 code 任一命中都视为「不可用」
+function pickerError(body: unknown): { message: string; unavailable: boolean } {
+	if (typeof body !== "object" || body === null) {
+		return { message: "", unavailable: false };
+	}
+	const record = body as { code?: unknown; error?: unknown };
+	return {
+		message: typeof record.error === "string" ? record.error : "",
+		unavailable: record.code === "picker-unavailable",
+	};
+}
+
+// POST /api/directory-picker/pick：取消返回 {path:null}；不可用抛 PickerUnavailableError。
+// macOS 上服务端会弹出系统模态框并阻塞到选择/取消，请求长时间在途属正常
+export async function pickDirectory(): Promise<{ path: string | null }> {
+	const res = await fetch("/api/directory-picker/pick", { method: "POST" });
+	let body: unknown = null;
+	try {
+		body = await res.json();
+	} catch {
+		// 非 JSON 响应体：按状态码兜底
+	}
+	if (!res.ok) {
+		const { message, unavailable } = pickerError(body);
+		const text = message === "" ? `HTTP ${res.status}` : message;
+		if (res.status === 501 || unavailable) {
+			throw new PickerUnavailableError(text);
+		}
+		throw new Error(text);
+	}
+	if (typeof body !== "object" || body === null) {
+		return { path: null };
+	}
+	const path = (body as { path?: unknown }).path;
+	return { path: typeof path === "string" ? path : null };
+}
+
+// 会话创建：workspaceId 与 cwd 互斥（工作区绑定由服务端完成，cwd 自动归属）
+export async function createSession(opts?: {
+	cwd?: string;
+	workspaceId?: string;
+}): Promise<string> {
+	const body = (await post("/api/sessions", opts ?? {})) as {
 		id: string;
 	};
 	return body.id;

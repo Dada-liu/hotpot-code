@@ -15,23 +15,30 @@ import {
 	cancelTurn,
 	createSession,
 	deleteSession,
+	deleteWorkspace,
 	getInbox,
 	getPermission,
 	listPrompts,
 	listSessions,
+	listWorkspaces,
 	type PromptInfo,
 	removeQueued,
+	renameWorkspace,
+	reorderWorkspaces,
 	type SessionSummary,
 	sendMessage,
 	setPermission,
 	steerQueued,
+	type WorkspaceWire,
 } from "./api.ts";
 import { AgentPanel } from "./components/AgentPanel.tsx";
 import { ChatView } from "./components/ChatView.tsx";
 import { SessionList } from "./components/SessionList.tsx";
 import { SettingsDialog } from "./components/SettingsDialog.tsx";
+import { WorkspacePickerDialog } from "./components/WorkspacePickerDialog.tsx";
 import { type ConnectionState, connect } from "./events.ts";
 import { sessionNameFromPrompt } from "./lib/session-name.ts";
+import { workspaceForSession } from "./lib/workspaces.ts";
 import { createInitialState, reduceChatAction } from "./state/reducer.ts";
 
 // 会话 id → 首轮提示词提取的显示名，持久化到 localStorage（服务端 SessionSummary 无 name 字段）
@@ -63,11 +70,16 @@ function errorMessage(e: unknown): string {
 
 export function App() {
 	const [sessions, setSessions] = useState<SessionSummary[]>([]);
+	// 工作区注册表：数组顺序即侧栏展示顺序
+	const [workspaces, setWorkspaces] = useState<WorkspaceWire[]>([]);
 	const [currentId, setCurrentId] = useState<string | null>(null);
 	// 点“新建会话”后进入待创建态：不立刻建会话，首条消息发送时才创建
 	const [pending, setPending] = useState(false);
-	// 待创建态选择的工作目录（新建会话对话框；null = 服务端默认 cwd）
-	const [pendingCwd, setPendingCwd] = useState<string | null>(null);
+	// 待创建会话绑定的工作区（null = 服务端默认 cwd，落未分组）
+	const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(
+		null,
+	);
+	const [pickerOpen, setPickerOpen] = useState(false);
 	const [names, setNames] = useState<Record<string, string>>(loadSessionNames);
 	const [chat, dispatch] = useReducer(
 		reduceChatAction,
@@ -100,6 +112,14 @@ export function App() {
 		}
 	}, []);
 
+	const refreshWorkspaces = useCallback(async () => {
+		try {
+			setWorkspaces(await listWorkspaces());
+		} catch (e) {
+			setError(errorMessage(e));
+		}
+	}, []);
+
 	// 队列快照：消费（drain/poll）不落事件，回合结束/发送 steer 后拉一次快照修正展示
 	const refreshInbox = useCallback(async (id: string) => {
 		try {
@@ -111,7 +131,8 @@ export function App() {
 
 	useEffect(() => {
 		void refreshSessions();
-	}, [refreshSessions]);
+		void refreshWorkspaces();
+	}, [refreshSessions, refreshWorkspaces]);
 
 	// 选中会话即连接 SSE；切换/卸载时关闭旧连接（effect cleanup）。
 	// connEpoch 供「同一会话强制重建连接」（归档当前会话后服务端已摘托管，需重连恢复）
@@ -164,11 +185,9 @@ export function App() {
 		}
 	}, [currentId, chat.turn, refreshInbox]);
 
-	const handleCreate = (cwd?: string): void => {
-		// Kimi 式延迟创建：直接清空对话区进入欢迎态，首条消息发送时才真正建会话。
-		// 新建会话对话框可选填工作目录（留空 = 服务端默认 cwd），随首条消息一起创建
-		const normalized = cwd?.trim() ?? "";
-		setPendingCwd(normalized === "" ? null : normalized);
+	// 进入待创建欢迎态：绑定目标工作区，首条消息发送时才真正建会话
+	const enterPending = (workspaceId: string | null): void => {
+		setPendingWorkspaceId(workspaceId);
 		setCurrentId(null);
 		setPending(true);
 		setNotices([]);
@@ -177,12 +196,72 @@ export function App() {
 		setError(null);
 	};
 
+	// 全局「新建会话」：当前会话所属工作区 → 第一个工作区 → 没有工作区则先添加
+	const handleCreateGlobal = (): void => {
+		const currentWorkspace =
+			currentId === null ? null : workspaceForSession(workspaces, currentId);
+		const target = currentWorkspace ?? workspaces[0] ?? null;
+		if (target === null) {
+			setPickerOpen(true);
+			return;
+		}
+		enterPending(target.id);
+	};
+
+	const handleNewSessionIn = (workspaceId: string): void => {
+		enterPending(workspaceId);
+	};
+
+	// 选择器创建成功：刷新注册表并让待建会话绑定到该工作区（可能是既有记录）
+	const handleWorkspaceCreated = (workspace: WorkspaceWire): void => {
+		setPickerOpen(false);
+		void refreshWorkspaces();
+		enterPending(workspace.id);
+	};
+
+	// 重命名失败向上抛，由侧栏弹窗展示服务端 message
+	const handleRenameWorkspace = async (
+		id: string,
+		title: string,
+	): Promise<void> => {
+		await renameWorkspace(id, title);
+		await refreshWorkspaces();
+	};
+
+	// 删除只注销注册：当前会话不重置对话，刷新后自然落入「未分组」
+	const handleDeleteWorkspace = async (id: string): Promise<void> => {
+		await deleteWorkspace(id);
+		setPendingWorkspaceId((prev) => (prev === id ? null : prev));
+		await Promise.all([refreshSessions(), refreshWorkspaces()]);
+	};
+
+	// 拖拽排序：先本地乐观更新，失败回滚（重新拉取）并上抛
+	const handleReorderWorkspaces = async (ids: string[]): Promise<void> => {
+		const previous = workspaces;
+		const byId = new Map(previous.map((w) => [w.id, w]));
+		const optimistic = ids
+			.map((id) => byId.get(id))
+			.filter((w): w is WorkspaceWire => w !== undefined);
+		if (optimistic.length === previous.length) {
+			setWorkspaces(optimistic);
+		}
+		try {
+			setWorkspaces(await reorderWorkspaces(ids));
+			setError(null);
+		} catch (e) {
+			setError(errorMessage(e));
+			await refreshWorkspaces();
+			throw e;
+		}
+	};
+
 	const handleSelect = (id: string): void => {
 		if (id === currentId) {
 			return;
 		}
 		setError(null);
 		setPending(false);
+		setPendingWorkspaceId(null);
 		setCurrentId(id);
 		dispatch({ type: "reset" });
 	};
@@ -216,9 +295,12 @@ export function App() {
 			if (id === currentId) {
 				setCurrentId(null);
 				setPending(false);
+				setPendingWorkspaceId(null);
 				dispatch({ type: "reset" });
 			}
 			await refreshSessions();
+			// 服务端删除会话后已从工作区 detach
+			void refreshWorkspaces();
 			setError(null);
 		} catch (e) {
 			setError(errorMessage(e));
@@ -230,13 +312,18 @@ export function App() {
 	// 只追加本地 notice 气泡，不进入回合
 	const handleSend = async (content: string): Promise<void> => {
 		try {
-			// 待创建态：首条消息先到——带待选 cwd 创建会话、以提示词命名、加入列表并连接
+			// 待创建态：首条消息先到——绑定待选工作区（无则服务端默认 cwd）创建会话、
+			// 以提示词命名、加入列表并连接
 			if (currentId === null) {
 				let id: string;
 				try {
-					id = await createSession(pendingCwd ?? undefined);
+					id = await createSession(
+						pendingWorkspaceId === null
+							? undefined
+							: { workspaceId: pendingWorkspaceId },
+					);
 				} catch (e) {
-					// cwd 校验失败（400）等：停在欢迎态，红字提示，可改工作目录后重试
+					// 工作区已删除（404）、cwd 校验失败（400）等：停在欢迎态，红字提示
 					setCreateError(errorMessage(e));
 					return;
 				}
@@ -247,9 +334,10 @@ export function App() {
 				});
 				setCurrentId(id);
 				setPending(false);
-				setPendingCwd(null);
+				setPendingWorkspaceId(null);
 				setCreateError(null);
-				await refreshSessions();
+				// 归属关系随创建变化，两个列表一起刷新
+				await Promise.all([refreshSessions(), refreshWorkspaces()]);
 				const result = await sendMessage(id, content);
 				if (result.reply != null) {
 					setNotices((n) => [...n, result.reply as string]);
@@ -395,6 +483,11 @@ export function App() {
 
 	const current = sessions.find((s) => s.id === currentId) ?? null;
 	const currentName = current ? (names[current.id] ?? current.cwd) : "";
+	// 待建会话绑定工作区：顶栏显示标题作为提示，title 展示完整路径
+	const pendingWorkspace =
+		pendingWorkspaceId === null
+			? null
+			: (workspaces.find((w) => w.id === pendingWorkspaceId) ?? null);
 	// 右侧面板开关只在 work agent 运行期间展示
 	const workerRunning = chat.agents.some(
 		(a) => a.role === "worker" && a.status === "running",
@@ -404,11 +497,20 @@ export function App() {
 		<TooltipProvider>
 			<div className="flex h-screen overflow-hidden">
 				<SessionList
+					workspaces={workspaces}
 					sessions={sessions}
 					currentId={currentId}
+					pendingWorkspaceId={pendingWorkspaceId}
 					nameFor={(s) => names[s.id] ?? s.cwd}
 					onSelect={handleSelect}
-					onCreate={handleCreate}
+					onNewSessionIn={handleNewSessionIn}
+					onNewSessionGlobal={handleCreateGlobal}
+					onAddWorkspace={() => {
+						setPickerOpen(true);
+					}}
+					onRenameWorkspace={handleRenameWorkspace}
+					onDeleteWorkspace={handleDeleteWorkspace}
+					onReorderWorkspaces={handleReorderWorkspaces}
 					onDelete={(id) => {
 						void handleDelete(id);
 					}}
@@ -420,18 +522,23 @@ export function App() {
 					}}
 				/>
 				<SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+				<WorkspacePickerDialog
+					open={pickerOpen}
+					onOpenChange={setPickerOpen}
+					onCreated={handleWorkspaceCreated}
+				/>
 				<div className="flex min-w-0 flex-1 flex-col">
 					<header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
 						<span
 							className="min-w-0 flex-1 truncate text-sm text-muted-foreground"
-							title={current?.cwd ?? pendingCwd ?? undefined}
+							title={current?.cwd ?? pendingWorkspace?.path ?? undefined}
 						>
 							{current
 								? currentName
 								: pending
-									? pendingCwd === null
+									? pendingWorkspace === null
 										? "新会话"
-										: `新会话 · ${pendingCwd}`
+										: `新会话 · ${pendingWorkspace.title}`
 									: "hotpot-agent"}
 						</span>
 						<span
