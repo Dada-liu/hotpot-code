@@ -43,6 +43,13 @@ M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会�
   - `close(id)` 在从 managed 摘除前上报该会话的 `session_end`（本会话累计 turn/error 数，flush 不 await，关闭路径不被网络重试拖住）；
   - 采集与上报异常全部吞掉，永不阻塞或失败一个回合。
 
+## W2 增量
+
+- **工作区注册表接入**：`SessionManager` 首次使用时懒打开 `openWorkspaceRegistry({ home })`（工厂仍同步），提供 `listWorkspaces` / `createWorkspace` / `renameWorkspace` / `removeWorkspace` / `reorderWorkspaces` / `createInWorkspace` 与 `pickDirectory` 薄封装；`WorkspaceError` 统一映射为 `SessionApiError`（invalid-path/title/order → 400，not-found → 404，name-conflict → 409，invalid-storage → 500）。
+- **新增路由**：`GET /api/workspaces`、`POST /api/workspaces`、`PATCH /api/workspaces/:id`、`DELETE /api/workspaces/:id`、`PUT /api/workspaces/order`、`POST /api/directory-picker/pick`（取消 200 `{path:null}`，无后端 501 `{code:"picker-unavailable"}`，超时 504）。
+- **会话归属**：`POST /api/sessions` body 改为 `{cwd?, workspaceId?}`（互斥）；`workspaceId` 用注册表记录的 canonical 路径建会话并 attach；显式 `cwd` 命中已注册工作区时自动归属。删除会话后 detach，归档保留归属。
+- **原生目录选择器**：`src/directory-picker.ts` 支持 macOS `osascript`、Windows PowerShell `FolderBrowserDialog`（`-STA`）与 Linux `zenity`/`kdialog`；可注入 `platform`/`timeoutMs`/`spawnFn` 供单测，默认 120s 超时后 kill 子进程。
+
 ## 目录
 
 ```
@@ -51,6 +58,7 @@ src/
   bin.ts               hotpot-server 启动入口（REST + SSE + 静态托管）
   serve.ts             startServer 启动装配（bin 与发布包 hotpot web 共用）
   app.ts               HTTP 路由（REST + SSE，requireSession 共享解析）
+  directory-picker.ts  系统原生目录选择器（macOS/Windows/Linux）
   tailer.ts            JSONL 会话日志 tailer（createTailer）
   wire.ts              UI 事件协议（WireEvent）与 seq 总线（createWireHub）
   approvals.ts         审批桥（pending 表 + parked promise）
@@ -62,6 +70,7 @@ test/
   tailer.test.ts              补读/坏行/半行/stop/offset 续读用例
   session-manager.test.ts     事件顺序/spawn/审批/plan/串行/attach/usage 集成用例
   api.test.ts                 REST/SSE 集成用例（真实端口 + fetch + SSE 流式消费）
+  directory-picker.test.ts    原生选择器平台分支/取消/回退/超时用例（假 spawn）
   static.test.ts              纯 API 模式/SPA 兜底/资产 MIME/public 直出用例
   telemetry.test.ts           遥测上报（turn/session 事件、无对话文本、关闭旁路）用例
 ```

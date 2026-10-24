@@ -14,6 +14,10 @@ import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
+import {
+	PickerTimeoutError,
+	PickerUnavailableError,
+} from "./directory-picker.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { PromptCommandError, SessionApiError } from "./session-manager.ts";
 import {
@@ -23,8 +27,19 @@ import {
 } from "./settings-store.ts";
 import type { WireEvent } from "./wire.ts";
 
+// cwd 与 workspaceId 互斥：两者都传由路由层 400
 const createSessionSchema = z.object({
 	cwd: z.string().optional(),
+	workspaceId: z.string().optional(),
+});
+const createWorkspaceSchema = z.object({
+	path: z.string(),
+});
+const renameWorkspaceSchema = z.object({
+	title: z.string(),
+});
+const reorderWorkspacesSchema = z.object({
+	ids: z.array(z.string()),
 });
 const messageSchema = z.object({
 	content: z.string(),
@@ -171,22 +186,137 @@ export function createApp(
 		const body = await readJsonBody(c);
 		const parsed = createSessionSchema.safeParse(body);
 		if (!parsed.success) {
-			return c.json({ error: "body 需为 {cwd?: string}" }, 400);
+			return c.json(
+				{ error: "body 需为 {cwd?: string, workspaceId?: string}" },
+				400,
+			);
 		}
-		// M2：显式 cwd 须 resolve 后存在且为目录，否则 400（缺省仍用 process.cwd()）
-		let cwd = parsed.data.cwd ?? process.cwd();
-		if (parsed.data.cwd !== undefined) {
-			cwd = resolve(parsed.data.cwd);
-			try {
-				if (!(await stat(cwd)).isDirectory()) {
-					return c.json({ error: `cwd 不是目录: ${cwd}` }, 400);
-				}
-			} catch {
-				return c.json({ error: `cwd 不存在: ${cwd}` }, 400);
+		if (
+			parsed.data.cwd !== undefined &&
+			parsed.data.workspaceId !== undefined
+		) {
+			return c.json({ error: "cwd 与 workspaceId 互斥，只能传其一" }, 400);
+		}
+		try {
+			// 工作区绑定：路径来自注册表记录（校验在 manager 内完成）
+			if (parsed.data.workspaceId !== undefined) {
+				const rec = await manager.createInWorkspace(parsed.data.workspaceId);
+				return c.json({ id: rec.id }, 201);
 			}
+			// M2：显式 cwd 须 resolve 后存在且为目录，否则 400（缺省仍用 process.cwd()）
+			let cwd = parsed.data.cwd ?? process.cwd();
+			if (parsed.data.cwd !== undefined) {
+				cwd = resolve(parsed.data.cwd);
+				try {
+					if (!(await stat(cwd)).isDirectory()) {
+						return c.json({ error: `cwd 不是目录: ${cwd}` }, 400);
+					}
+				} catch {
+					return c.json({ error: `cwd 不存在: ${cwd}` }, 400);
+				}
+			}
+			const rec = await manager.create(cwd);
+			return c.json({ id: rec.id }, 201);
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
 		}
-		const rec = await manager.create(cwd);
-		return c.json({ id: rec.id }, 201);
+	});
+
+	// ---- 工作区注册表（web 侧栏分组）----
+	// 记录原样返回：id/path/title/createdAt/updatedAt/sessionIds（数组顺序即展示顺序）
+
+	app.get("/api/workspaces", async (c) => {
+		return c.json({ workspaces: await manager.listWorkspaces() });
+	});
+
+	app.post("/api/workspaces", async (c) => {
+		const body = await readJsonBody(c);
+		const parsed = createWorkspaceSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json({ error: "body 需为 {path: string}" }, 400);
+		}
+		try {
+			return c.json(await manager.createWorkspace(parsed.data.path));
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// 排序必须完整覆盖现有 id（长度相同、无重复、无未知 id），否则 400
+	app.put("/api/workspaces/order", async (c) => {
+		const body = await readJsonBody(c);
+		const parsed = reorderWorkspacesSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json({ error: "body 需为 {ids: string[]}" }, 400);
+		}
+		try {
+			return c.json({
+				workspaces: await manager.reorderWorkspaces(parsed.data.ids),
+			});
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	app.patch("/api/workspaces/:id", async (c) => {
+		const body = await readJsonBody(c);
+		const parsed = renameWorkspaceSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json({ error: "body 需为 {title: string}" }, 400);
+		}
+		try {
+			const workspace = await manager.renameWorkspace(
+				c.req.param("id"),
+				parsed.data.title,
+			);
+			return c.json({ workspace });
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// 只注销注册：目录与会话日志保留，会话落入未分组
+	app.delete("/api/workspaces/:id", async (c) => {
+		try {
+			await manager.removeWorkspace(c.req.param("id"));
+			return c.body(null, 204);
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// 系统原生目录选择器：取消 200 {path:null}；无可用后端 501；超时 504；其他失败 500。
+	// body 忽略（客户端无需传参），因此这里不读请求体
+	app.post("/api/directory-picker/pick", async (c) => {
+		try {
+			return c.json({ path: await manager.pickDirectory() });
+		} catch (err) {
+			if (err instanceof PickerUnavailableError) {
+				return c.json({ code: "picker-unavailable", error: err.message }, 501);
+			}
+			if (err instanceof PickerTimeoutError) {
+				return c.json({ error: err.message }, 504);
+			}
+			return c.json(
+				{ error: err instanceof Error ? err.message : String(err) },
+				500,
+			);
+		}
 	});
 
 	app.get("/api/sessions/:id", async (c) => {

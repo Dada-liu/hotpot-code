@@ -4,9 +4,16 @@
 // SSE 连接用 AbortController 中断模拟断线；重连经 Last-Event-ID / ?after= 补发。
 
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { serve } from "@hono/node-server";
 import {
 	type LlmAdapter,
@@ -24,6 +31,10 @@ import {
 } from "@hotpot/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.ts";
+import {
+	PickerTimeoutError,
+	PickerUnavailableError,
+} from "../src/directory-picker.ts";
 import {
 	createSessionManager,
 	type SessionManager,
@@ -94,6 +105,7 @@ const fixtures: ApiFixture[] = [];
 async function startApi(
 	adapter: LlmAdapter,
 	mode?: PermissionMode,
+	opts?: { picker?: () => Promise<string | null> },
 ): Promise<ApiFixture> {
 	const home = await mkdtemp(join(tmpdir(), "hotpot-api-home-"));
 	const proj = await mkdtemp(join(tmpdir(), "hotpot-api-proj-"));
@@ -115,6 +127,7 @@ async function startApi(
 	const manager = createSessionManager({
 		home,
 		llm: { adapter, model: MODEL },
+		...(opts?.picker === undefined ? {} : { picker: opts.picker }),
 	});
 	// settings 路由指向同一 home（测试注入临时目录，避免读写真实 ~/.hotpot）
 	const app = createApp(manager, { home });
@@ -1468,6 +1481,251 @@ describe("M2 endpoints", () => {
 		expect(bogusRes.status).toBe(400);
 		const bogusBody = (await bogusRes.json()) as { error: string };
 		expect(bogusBody.error).toContain("readonly, workspace, full");
+	}, 20000);
+});
+
+// ---- 工作区注册表（W2）：CRUD、会话绑定与目录选择器 ----
+
+interface WorkspaceBody {
+	id: string;
+	path: string;
+	title: string;
+	createdAt: string;
+	updatedAt: string;
+	sessionIds: string[];
+}
+
+describe("工作区与目录选择器", () => {
+	const workspaceUrl = (base: string): string => `${base}/api/workspaces`;
+
+	async function listWorkspaces(base: string): Promise<WorkspaceBody[]> {
+		const res = await fetch(workspaceUrl(base));
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { workspaces: WorkspaceBody[] };
+		return body.workspaces;
+	}
+
+	async function createWorkspace(
+		base: string,
+		path: string,
+	): Promise<{ workspace: WorkspaceBody; created: boolean }> {
+		const res = await postJson(workspaceUrl(base), { path });
+		expect(res.status).toBe(200);
+		return (await res.json()) as {
+			workspace: WorkspaceBody;
+			created: boolean;
+		};
+	}
+
+	it("工作区 CRUD：创建/重复/非法路径/重命名 400·409·404/排序/删除 204", async () => {
+		const fx = await startApi(scriptedAdapter([]), "full");
+		const secondDir = join(fx.proj, "ws-two");
+		await mkdir(secondDir);
+
+		// 创建：path 规范化到 realpath，标题默认取目录末段
+		const first = await createWorkspace(fx.base, fx.proj);
+		expect(first.created).toBe(true);
+		expect(first.workspace.path).toBe(await realpath(fx.proj));
+		expect(first.workspace.title).toBe(basename(fx.proj));
+		expect(first.workspace.sessionIds).toEqual([]);
+		expect(typeof first.workspace.createdAt).toBe("string");
+		expect(typeof first.workspace.updatedAt).toBe("string");
+
+		// 同一 canonical 路径重复添加：返回既有记录，created:false
+		const duplicate = await createWorkspace(fx.base, fx.proj);
+		expect(duplicate.created).toBe(false);
+		expect(duplicate.workspace.id).toBe(first.workspace.id);
+
+		// 非法路径：相对路径、不存在、不是目录 → 400
+		expect(
+			(await postJson(workspaceUrl(fx.base), { path: "relative/dir" })).status,
+		).toBe(400);
+		expect(
+			(
+				await postJson(workspaceUrl(fx.base), {
+					path: join(fx.proj, "no-such-dir"),
+				})
+			).status,
+		).toBe(400);
+		expect(
+			(
+				await postJson(workspaceUrl(fx.base), {
+					path: join(fx.proj, "note.txt"),
+				})
+			).status,
+		).toBe(400);
+		expect((await postJson(workspaceUrl(fx.base), {})).status).toBe(400);
+
+		const second = await createWorkspace(fx.base, secondDir);
+		expect(second.created).toBe(true);
+		// 新建插到头部：最近添加的在前
+		expect((await listWorkspaces(fx.base)).map((w) => w.id)).toEqual([
+			second.workspace.id,
+			first.workspace.id,
+		]);
+
+		const rename = (id: string, title: string): Promise<Response> =>
+			fetch(`${workspaceUrl(fx.base)}/${id}`, {
+				method: "PATCH",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ title }),
+			});
+
+		// 重命名：空标题 400、重名 409、未知 id 404、成功 200
+		expect((await rename(first.workspace.id, "   ")).status).toBe(400);
+		expect(
+			(await rename(second.workspace.id, first.workspace.title)).status,
+		).toBe(409);
+		expect((await rename("nope", "x")).status).toBe(404);
+		const renamed = await rename(first.workspace.id, "项目 A");
+		expect(renamed.status).toBe(200);
+		const renamedBody = (await renamed.json()) as { workspace: WorkspaceBody };
+		expect(renamedBody.workspace.title).toBe("项目 A");
+
+		// 排序：合法完整排列 → 200 并按新顺序返回；缺项/重复/未知 id → 400
+		const order = async (ids: string[]): Promise<Response> =>
+			fetch(`${workspaceUrl(fx.base)}/order`, {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ ids }),
+			});
+		const ordered = await order([first.workspace.id, second.workspace.id]);
+		expect(ordered.status).toBe(200);
+		const orderedBody = (await ordered.json()) as {
+			workspaces: WorkspaceBody[];
+		};
+		expect(orderedBody.workspaces.map((w) => w.id)).toEqual([
+			first.workspace.id,
+			second.workspace.id,
+		]);
+		expect((await order([first.workspace.id])).status).toBe(400);
+		expect((await order([first.workspace.id, first.workspace.id])).status).toBe(
+			400,
+		);
+		expect(
+			(await order([first.workspace.id, "no-such-workspace"])).status,
+		).toBe(400);
+		expect(
+			(
+				await fetch(`${workspaceUrl(fx.base)}/order`, {
+					method: "PUT",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ ids: "nope" }),
+				})
+			).status,
+		).toBe(400);
+
+		// 删除：204 且只注销注册；未知 id 404
+		const del = (id: string): Promise<Response> =>
+			fetch(`${workspaceUrl(fx.base)}/${id}`, { method: "DELETE" });
+		expect((await del(first.workspace.id)).status).toBe(204);
+		expect((await listWorkspaces(fx.base)).map((w) => w.id)).toEqual([
+			second.workspace.id,
+		]);
+		expect((await del(second.workspace.id)).status).toBe(204);
+		expect(await listWorkspaces(fx.base)).toEqual([]);
+		expect((await del("nope")).status).toBe(404);
+	}, 20000);
+
+	it("会话绑定：workspaceId 建会话并归属；cwd 命中自动归属；同传 400；归档保留、删除 detach", async () => {
+		const fx = await startApi(scriptedAdapter([]), "full");
+		const { workspace } = await createWorkspace(fx.base, fx.proj);
+		const membership = async (): Promise<string[]> => {
+			const list = await listWorkspaces(fx.base);
+			return list.find((w) => w.id === workspace.id)?.sessionIds ?? [];
+		};
+
+		// cwd 与 workspaceId 互斥；未知 workspaceId → 404
+		expect(
+			(
+				await postJson(`${fx.base}/api/sessions`, {
+					cwd: fx.proj,
+					workspaceId: workspace.id,
+				})
+			).status,
+		).toBe(400);
+		expect(
+			(
+				await postJson(`${fx.base}/api/sessions`, {
+					workspaceId: "no-such-workspace",
+				})
+			).status,
+		).toBe(404);
+
+		// workspaceId：cwd 取注册表的 canonical 路径，创建后归属
+		const created = await postJson(`${fx.base}/api/sessions`, {
+			workspaceId: workspace.id,
+		});
+		expect(created.status).toBe(201);
+		const { id } = (await created.json()) as { id: string };
+		const detail = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { cwd: string };
+		expect(detail.cwd).toBe(workspace.path);
+		expect(await membership()).toContain(id);
+
+		// cwd 命中已注册工作区：自动归属
+		const viaCwd = await postJson(`${fx.base}/api/sessions`, { cwd: fx.proj });
+		expect(viaCwd.status).toBe(201);
+		const cwdId = ((await viaCwd.json()) as { id: string }).id;
+		expect(await membership()).toContain(cwdId);
+
+		// 归档只摘托管，不解除归属
+		expect(
+			(await postJson(`${fx.base}/api/sessions/${id}/archive`)).status,
+		).toBe(200);
+		expect(await membership()).toContain(id);
+
+		// 删除会话：成员关系移除
+		expect(
+			(await fetch(`${fx.base}/api/sessions/${id}`, { method: "DELETE" }))
+				.status,
+		).toBe(204);
+		expect(await membership()).not.toContain(id);
+	}, 20000);
+
+	it("directory-picker 路由：路径/null/501 unavailable/504 timeout", async () => {
+		let mode: "path" | "null" | "unavailable" | "timeout" = "path";
+		const fx = await startApi(scriptedAdapter([]), "full", {
+			picker: async () => {
+				if (mode === "unavailable") {
+					throw new PickerUnavailableError("没有可用的系统目录选择器");
+				}
+				if (mode === "timeout") {
+					throw new PickerTimeoutError("目录选择器超时");
+				}
+				return mode === "path" ? "/tmp/picked-workspace" : null;
+			},
+		});
+		const pick = (): Promise<Response> =>
+			postJson(`${fx.base}/api/directory-picker/pick`);
+
+		// body 可省略
+		const ok = await pick();
+		expect(ok.status).toBe(200);
+		expect(await ok.json()).toEqual({ path: "/tmp/picked-workspace" });
+
+		mode = "null";
+		const cancelled = await pick();
+		expect(cancelled.status).toBe(200);
+		expect(await cancelled.json()).toEqual({ path: null });
+
+		mode = "unavailable";
+		const unavailable = await pick();
+		expect(unavailable.status).toBe(501);
+		const unavailableBody = (await unavailable.json()) as {
+			code: string;
+			error: string;
+		};
+		expect(unavailableBody.code).toBe("picker-unavailable");
+		expect(typeof unavailableBody.error).toBe("string");
+
+		mode = "timeout";
+		const timeout = await pick();
+		expect(timeout.status).toBe(504);
+		expect(typeof ((await timeout.json()) as { error: string }).error).toBe(
+			"string",
+		);
 	}, 20000);
 });
 

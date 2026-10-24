@@ -33,7 +33,14 @@
 // live 事件按 seq 序推送——每订阅者的 FIFO 序由单线程同步交付天然保证。
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	readdir,
+	realpath,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { LlmAdapter, ModelInfo } from "@hotpot/ai";
 import {
@@ -51,6 +58,7 @@ import {
 	loadSession,
 	loadSettings,
 	type ModelTier,
+	openWorkspaceRegistry,
 	type PermissionMode,
 	type PromptTemplate,
 	resolveHome,
@@ -60,6 +68,9 @@ import {
 	type SessionEvent,
 	type SessionSummary,
 	type Settings,
+	WorkspaceError,
+	type WorkspaceRecord,
+	type WorkspaceRegistry,
 } from "@hotpot/core";
 import {
 	closeMcpConnections,
@@ -87,6 +98,7 @@ import {
 	type TelemetryRuntime,
 } from "@hotpot/telemetry";
 import { type ApprovalBridge, createApprovalBridge } from "./approvals.ts";
+import { pickDirectory } from "./directory-picker.ts";
 import { createTailer, type Tailer } from "./tailer.ts";
 import { summarizeUsage, type UsageSummary } from "./usage.ts";
 import {
@@ -124,8 +136,9 @@ export class PromptCommandError extends Error {
 
 // M2 REST 4xx 映射：manager 方法对可预期非法输入（上传超限/含 NUL、fs 逃逸等）抛本错误，
 // 路由层按 status 转 {error}+状态码；message 即 {error} 文案。
-// status 收窄为字面量联合：Hono c.json 只接受具体状态码字面量
-export type SessionApiErrorStatus = 400 | 404 | 409 | 413;
+// status 收窄为字面量联合：Hono c.json 只接受具体状态码字面量。
+// 500 供工作区存储损坏（invalid-storage）使用
+export type SessionApiErrorStatus = 400 | 404 | 409 | 413 | 500;
 
 export class SessionApiError extends Error {
 	readonly status: SessionApiErrorStatus;
@@ -218,15 +231,30 @@ export interface SessionManagerOptions {
 	mcpCreateClient?: McpClientFactory;
 	// 测试注入点：遥测上报用的 fetch，默认走全局 fetch
 	telemetryFetch?: typeof fetch;
+	// 测试注入点：系统目录选择器（默认调 directory-picker 的原生实现）
+	picker?: () => Promise<string | null>;
 }
 
 export interface SessionManager {
 	create(cwd: string): Promise<SessionRecord>;
+	// 在工作区内建会话：取注册表记录的 path 作 cwd，创建成功后 attach；
+	// 未知 workspaceId 抛 SessionApiError(404)，路径失效抛 400
+	createInWorkspace(workspaceId: string): Promise<SessionRecord>;
 	// 按会话 id 恢复（listSessions 找 filePath → resumeSession + foldInbox 播种），
 	// 未命中返回 null
 	attachById(id: string): Promise<SessionRecord | null>;
 	get(id: string): SessionRecord | null;
 	list(): Promise<(SessionSummary & { running: boolean })[]>;
+	// 工作区注册表薄封装：WorkspaceError 统一转 SessionApiError（400/404/409/500）
+	listWorkspaces(): Promise<WorkspaceRecord[]>;
+	createWorkspace(
+		path: string,
+	): Promise<{ workspace: WorkspaceRecord; created: boolean }>;
+	renameWorkspace(id: string, title: string): Promise<WorkspaceRecord>;
+	removeWorkspace(id: string): Promise<void>;
+	reorderWorkspaces(ids: string[]): Promise<WorkspaceRecord[]>;
+	// 系统原生目录选择器：取消返回 null，不可用/超时抛对应错误
+	pickDirectory(): Promise<string | null>;
 	// turn 串行：挂到该会话的 turnTail 链尾，前一回合（含 followup 补发）结束后才执行。
 	// `/name args` 命中 prompt template 时先展开并落 prompt/invoked；未命中抛 PromptCommandError。
 	// 内置指令（/help、/permission）在模板解析前拦截，直接本地应答（SendOutcome.reply 非空），
@@ -450,6 +478,91 @@ export function createSessionManager(
 ): SessionManager {
 	const warn = opts.warn ?? (() => {});
 	const managed = new Map<string, ManagedSession>();
+
+	// 工作区注册表懒打开：工厂保持同步，首次用到时才读盘（打开失败会被缓存，
+	// 每次调用都得到一个 rejected Promise，路由统一转 500）
+	let registryPromise: Promise<WorkspaceRegistry> | null = null;
+	function openRegistry(): Promise<WorkspaceRegistry> {
+		if (registryPromise === null) {
+			registryPromise = openWorkspaceRegistry({ home: opts.home });
+		}
+		return registryPromise;
+	}
+
+	// WorkspaceError → SessionApiError：错误码映射到 REST 状态码，message 用中文。
+	// 非 WorkspaceError 原样抛回（真实故障交给 onError 500）
+	function workspaceApiError(err: unknown): unknown {
+		if (!(err instanceof WorkspaceError)) return err;
+		switch (err.code) {
+			case "invalid-path":
+				return new SessionApiError(
+					400,
+					"工作区路径无效（需为已存在的绝对目录）",
+				);
+			case "invalid-title":
+				return new SessionApiError(400, "工作区标题不能为空");
+			case "invalid-order":
+				return new SessionApiError(
+					400,
+					"工作区顺序非法（需包含全部工作区 id 且不重复）",
+				);
+			case "not-found":
+				return new SessionApiError(404, "工作区不存在");
+			case "name-conflict":
+				return new SessionApiError(409, "工作区标题已被占用");
+			case "invalid-storage":
+				return new SessionApiError(500, `工作区存储不可用：${err.message}`);
+		}
+	}
+
+	// 注册表操作统一出口：把 WorkspaceError 转成带状态码的 API 错误
+	async function withRegistry<T>(
+		fn: (registry: WorkspaceRegistry) => Promise<T>,
+	): Promise<T> {
+		let registry: WorkspaceRegistry;
+		try {
+			registry = await openRegistry();
+		} catch (err) {
+			throw workspaceApiError(err);
+		}
+		try {
+			return await fn(registry);
+		} catch (err) {
+			throw workspaceApiError(err);
+		}
+	}
+
+	// cwd 命中已注册工作区时自动归属（CLI/web 会话回到同一侧栏）；
+	// 注册表故障不能拖垮建会话，只告警
+	async function attachByPathQuiet(
+		sessionId: string,
+		cwd: string,
+	): Promise<void> {
+		try {
+			const registry = await openRegistry();
+			const workspace = registry.findByPath(cwd);
+			if (workspace !== null) {
+				await registry.attachSession(workspace.id, sessionId);
+			}
+		} catch (err) {
+			warn(
+				`工作区自动归属失败（${sessionId}）：${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
+	// 删除会话后清理归属；失败只告警——会话文件已经删掉，不能因此报错
+	async function detachQuiet(sessionId: string): Promise<void> {
+		try {
+			await (await openRegistry()).detachSession(sessionId);
+		} catch (err) {
+			warn(
+				`工作区归属清理失败（${sessionId}）：${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
+	const picker = opts.picker ?? (() => pickDirectory());
 
 	// M5 遥测旁路：整个 manager 共用一个运行时（未启用或 endpoint 不可用时为 null）。
 	// 读配置失败也只退化为 null——遥测问题不能影响服务启动与会话装配
@@ -940,26 +1053,52 @@ export function createSessionManager(
 		await closeMcpConnections(m.mcpConnections);
 	}
 
+	// 建会话的统一入口（create 与 createInWorkspace 共用）：装配完成后按 cwd 自动归属
+	async function createAt(cwd: string): Promise<SessionRecord> {
+		const settings = loadSettings({ cwd, home: opts.home });
+		const session = await createSession(cwd, opts.home);
+		const { meta } = await loadSession(session.filePath);
+		if (meta.type !== "meta") {
+			throw new Error(`会话文件缺 meta 头: ${session.filePath}`);
+		}
+		// 遥测会话时长从会话创建时间算起；createdAt 不可解析时退回当前时刻
+		const createdAtMs = Date.parse(meta.createdAt);
+		const m = await assemble({
+			session,
+			cwd,
+			settings,
+			createdAt: meta.createdAt,
+			startedAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
+		});
+		managed.set(m.id, m);
+		emitSessionStart(m, false);
+		await attachByPathQuiet(m.id, cwd);
+		return recordOf(m);
+	}
+
 	return {
-		async create(cwd: string): Promise<SessionRecord> {
-			const settings = loadSettings({ cwd, home: opts.home });
-			const session = await createSession(cwd, opts.home);
-			const { meta } = await loadSession(session.filePath);
-			if (meta.type !== "meta") {
-				throw new Error(`会话文件缺 meta 头: ${session.filePath}`);
+		create: createAt,
+
+		async createInWorkspace(workspaceId: string): Promise<SessionRecord> {
+			const workspace = await withRegistry((r) =>
+				Promise.resolve(r.list().find((w) => w.id === workspaceId)),
+			);
+			if (workspace === undefined) {
+				throw new SessionApiError(404, "工作区不存在");
 			}
-			// 遥测会话时长从会话创建时间算起；createdAt 不可解析时退回当前时刻
-			const createdAtMs = Date.parse(meta.createdAt);
-			const m = await assemble({
-				session,
-				cwd,
-				settings,
-				createdAt: meta.createdAt,
-				startedAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
-			});
-			managed.set(m.id, m);
-			emitSessionStart(m, false);
-			return recordOf(m);
+			// 注册后目录可能被删除/替换：沿用 cwd 的同一套校验与中文报错
+			try {
+				if (!(await stat(workspace.path)).isDirectory()) {
+					throw new SessionApiError(400, `cwd 不是目录: ${workspace.path}`);
+				}
+			} catch (err) {
+				if (err instanceof SessionApiError) throw err;
+				throw new SessionApiError(400, `cwd 不存在: ${workspace.path}`);
+			}
+			const rec = await createAt(workspace.path);
+			// createAt 已按 realpath 自动归属；这里再显式挂一次保证契约（幂等，无写盘）
+			await withRegistry((r) => r.attachSession(workspace.id, rec.id));
+			return rec;
 		},
 
 		async attachById(id: string): Promise<SessionRecord | null> {
@@ -996,6 +1135,32 @@ export function createSessionManager(
 				const m = managed.get(s.id);
 				return { ...s, running: m ? m.holder.running : false };
 			});
+		},
+
+		async listWorkspaces(): Promise<WorkspaceRecord[]> {
+			return withRegistry((r) => Promise.resolve(r.list()));
+		},
+
+		async createWorkspace(
+			path: string,
+		): Promise<{ workspace: WorkspaceRecord; created: boolean }> {
+			return withRegistry((r) => r.create(path));
+		},
+
+		async renameWorkspace(id: string, title: string): Promise<WorkspaceRecord> {
+			return withRegistry((r) => r.rename(id, title));
+		},
+
+		async removeWorkspace(id: string): Promise<void> {
+			return withRegistry((r) => r.remove(id));
+		},
+
+		async reorderWorkspaces(ids: string[]): Promise<WorkspaceRecord[]> {
+			return withRegistry((r) => r.reorder(ids));
+		},
+
+		pickDirectory(): Promise<string | null> {
+			return picker();
 		},
 
 		async send(id: string, content: string): Promise<SendOutcome> {
@@ -1292,6 +1457,7 @@ export function createSessionManager(
 				// 托管会话：按 close 收尾（审批/尾随/遥测/MCP 全关停）后删磁盘日志
 				await closeManaged(id);
 				await rm(m.filePath, { force: true });
+				await detachQuiet(id);
 				return true;
 			}
 			// 纯磁盘会话（未托管）：定位日志文件直接删除
@@ -1299,6 +1465,7 @@ export function createSessionManager(
 			const summary = summaries.find((s) => s.id === id);
 			if (summary === undefined) return false;
 			await rm(summary.filePath, { force: true });
+			await detachQuiet(id);
 			return true;
 		},
 	};
