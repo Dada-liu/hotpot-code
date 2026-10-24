@@ -99,7 +99,7 @@ M3 已完成：Web 端交付——`packages/server`（REST + SSE，默认 4573 �
 
 M5 已完成（本仓库部分）：`packages/telemetry` 匿名遥测客户端（cli/server 接入、事件白名单、脱敏、批量重试）+ `benchmarks/` benchmark runner（SWE-bench 实例导出/选择、普通 checkout + worktree、无交互 agent、predictions、官方 `swebench` harness 编排、报告、`benchmark_run` 遥测、自建题三类）。用法见 `benchmarks/README.md`；自建题沉淀流程见 `docs/benchmark-authoring.md`；Lite 10 题验收记录见 `docs/archive/04-roadmap.md` M5 节。遥测后台是仓库外独立项目 `../hotpot-telemetry/`，不进入工具产物。
 
-M6 已完成：Web 端交互完善——运行中发送默认进入 next-turn 队列（QueueBar 固定在输入框上方；点击条目转 steer 注入、✕ 移除，消费即落盘，重开不会重复执行）；新建会话可指定工作区 cwd，会话行展示 cwd；权限三档（只读/工作区修改/完全权限，按审批策略实现，composer 内实时切换并持久化）；composer 支持 `/` 内置指令（`/help`、`/permission`）与 prompt 模板、➕ 文本附件上传、`@` 工作区文件提及（main agent 新增 read 工具按引用读取）。
+M6 已完成：Web 端交互完善——运行中发送默认进入 next-turn 队列（QueueBar 固定在输入框上方；点击条目转 steer 注入、✕ 移除，消费即落盘，重开不会重复执行）；工作区是一等实体（`~/.hotpot/workspaces.json` 持久化注册表：路径/标题/会话归属/顺序），侧栏按工作区分组、组内新建会话、重命名/删除/拖拽排序，新增工作区走系统原生目录选择器（macOS `osascript`、Windows `FolderBrowserDialog`、Linux `zenity`/`kdialog`，不可用时降级手填路径）；权限三档（只读/工作区修改/完全权限，按审批策略实现，composer 内实时切换并持久化）；composer 支持 `/` 内置指令（`/help`、`/permission`）与 prompt 模板、➕ 文本附件上传、`@` 工作区文件提及（main agent 新增 read 工具按引用读取）。
 
 运行方式：
 
