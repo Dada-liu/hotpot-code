@@ -206,6 +206,8 @@ function Composer({
 	permissionDisabled = false,
 	onPermissionChange,
 	onSend,
+	showCancel = false,
+	onCancel,
 }: {
 	running: boolean;
 	prompts: PromptInfo[];
@@ -216,6 +218,9 @@ function Composer({
 	permissionDisabled?: boolean;
 	onPermissionChange: (mode: PermissionMode) => void;
 	onSend: (content: string) => void;
+	// 回合运行中且队列为空时，取消钮放在底部按钮区（队列非空时由 QueueBar 承担）
+	showCancel?: boolean;
+	onCancel?: () => void;
 }): ReactElement {
 	const [draft, setDraft] = useState("");
 	const [attachments, setAttachments] = useState<AttachmentChip[]>([]);
@@ -632,19 +637,33 @@ function Composer({
 							</TooltipContent>
 						</Tooltip>
 					</div>
-					<Button
-						type="submit"
-						size="icon"
-						className="rounded-full"
-						disabled={draft.trim() === "" && attachments.length === 0}
-						aria-label={running ? "排队" : "发送"}
-					>
-						{running ? (
-							<ListPlus className="size-4" />
-						) : (
-							<Send className="size-4" />
+					<div className="flex items-center gap-1">
+						{showCancel && onCancel !== undefined && (
+							<Button
+								type="button"
+								variant="ghost"
+								size="icon"
+								className="rounded-full text-destructive hover:text-destructive"
+								onClick={onCancel}
+								aria-label="取消运行"
+							>
+								<Square className="size-4" />
+							</Button>
 						)}
-					</Button>
+						<Button
+							type="submit"
+							size="icon"
+							className="rounded-full"
+							disabled={draft.trim() === "" && attachments.length === 0}
+							aria-label={running ? "排队" : "发送"}
+						>
+							{running ? (
+								<ListPlus className="size-4" />
+							) : (
+								<Send className="size-4" />
+							)}
+						</Button>
+					</div>
 				</div>
 			</div>
 		</form>
@@ -699,13 +718,15 @@ function TurnView({
 				standingItems.length > 0 ||
 				finalEntry !== undefined ||
 				streamingHere) && (
-				<div className="flex items-start gap-3">
+				/* xl+：内容列与 composer 同宽对齐，头像绝对定位到左缘之外；
+				   窄窗口回退为头像在左的横向布局，避免越界遮挡侧栏 */
+				<div className="relative flex items-start gap-3 xl:block">
 					<img
 						src="/main_agent.png"
 						alt="main agent"
-						className="mt-0.5 size-9 shrink-0 rounded-full bg-secondary object-cover"
+						className="mt-0.5 size-9 shrink-0 rounded-full bg-secondary object-cover xl:absolute xl:-left-12 xl:top-0.5 xl:mt-0"
 					/>
-					<div className="flex min-w-0 flex-1 flex-col gap-3">
+					<div className="flex min-w-0 flex-1 flex-col gap-3 xl:w-full">
 						{processItems.length > 0 && (
 							<div>
 								<button
@@ -772,9 +793,10 @@ function TurnView({
 	);
 }
 
-// steer/queue 队列条（M4 重做）：固定展示于输入框上方（队列非空或回合运行中）。
+// steer/queue 队列条：仅在队列非空时展示在输入框上方（无排队/注入消息时不出现）。
 // next-turn（排队）条目点击本体 = 转为 steer 注入（POST queue/:id/steer）、✕ 移除；
-// next-step（注入中）条目只读；头部 = 计数 + 运行中圆点 + 取消钮（停止钮自 composer 迁来）。
+// next-step（注入中）条目只读；头部 = 计数 + 运行中圆点 + 取消钮。
+// 队列为空但回合仍运行时的取消钮放在 composer 底部按钮区（避免空队列条占位）。
 // 请求在途时禁用行操作；steer/移除失败保留条目（错误经 App 顶栏透出）
 function QueueBar({
 	inbox,
@@ -794,7 +816,8 @@ function QueueBar({
 	// 运行中默认展开；用户手动切换后尊重选择
 	const [open, setOpen] = useState(running);
 	const total = inbox.nextStep.length + inbox.nextTurn.length;
-	if (total === 0 && !running) {
+	// 队列为空时不渲染（运行中的取消钮由 composer 承担）
+	if (total === 0) {
 		return null;
 	}
 	return (
@@ -974,35 +997,40 @@ export function ChatView({
 
 	const groups = groupTranscript(state.transcript);
 	const lastIndex = groups.length - 1;
+	// 队列为空且回合运行中：取消钮放 composer 底部（队列非空时 QueueBar 内有取消钮）
+	const queueCount = state.inbox.nextTurn.length + state.inbox.nextStep.length;
 
 	return (
 		<main className="flex min-h-0 flex-1 flex-col">
 			<div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-				<div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-6">
-					{groups.map((group, i) => (
-						<TurnView
-							key={group.id}
-							group={group}
-							isLast={i === lastIndex}
-							streaming={state.streaming}
-							pendingApproval={state.pendingApproval}
-							pendingPlan={state.pendingPlan}
-							onApproval={onApproval}
-							approvalBusy={approvalBusy}
-							onPlanDecision={onPlanDecision}
-						/>
-					))}
-					{/* 内置指令回复的本地气泡：居中弱化文本行，不进对话流、不落库 */}
-					{notices.map((notice, i) => (
-						<div
-							// 顺序追加、切换会话即清空，下标即可作 key
-							// biome-ignore lint/suspicious/noArrayIndexKey: 只追加不重排，下标稳定
-							key={i}
-							className="whitespace-pre-wrap text-center text-xs text-muted-foreground"
-						>
-							{notice}
-						</div>
-					))}
+				{/* 与 composer 同构：外层 px-4 + 内层 max-w-3xl，文字左缘与输入框对齐 */}
+				<div className="px-4 py-6">
+					<div className="mx-auto flex max-w-3xl flex-col gap-6">
+						{groups.map((group, i) => (
+							<TurnView
+								key={group.id}
+								group={group}
+								isLast={i === lastIndex}
+								streaming={state.streaming}
+								pendingApproval={state.pendingApproval}
+								pendingPlan={state.pendingPlan}
+								onApproval={onApproval}
+								approvalBusy={approvalBusy}
+								onPlanDecision={onPlanDecision}
+							/>
+						))}
+						{/* 内置指令回复的本地气泡：居中弱化文本行，不进对话流、不落库 */}
+						{notices.map((notice, i) => (
+							<div
+								// 顺序追加、切换会话即清空，下标即可作 key
+								// biome-ignore lint/suspicious/noArrayIndexKey: 只追加不重排，下标稳定
+								key={i}
+								className="whitespace-pre-wrap text-center text-xs text-muted-foreground"
+							>
+								{notice}
+							</div>
+						))}
+					</div>
 				</div>
 			</div>
 			{hasSession && (
@@ -1028,6 +1056,8 @@ export function ChatView({
 							permissionDisabled={permissionBusy}
 							onPermissionChange={onPermissionChange}
 							onSend={onSend}
+							showCancel={state.turn === "running" && queueCount === 0}
+							onCancel={onCancel}
 						/>
 					</div>
 				</div>
