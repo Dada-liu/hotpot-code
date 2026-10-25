@@ -27,10 +27,12 @@ import {
 } from "./settings-store.ts";
 import type { WireEvent } from "./wire.ts";
 
-// cwd 与 workspaceId 互斥：两者都传由路由层 400
+// cwd 与 workspaceId（字符串）互斥；workspaceId=null 表示明确不归属工作区
+// （跳过按 cwd 自动归属），permissionMode 为草稿态选的权限档位
 const createSessionSchema = z.object({
 	cwd: z.string().optional(),
-	workspaceId: z.string().optional(),
+	workspaceId: z.string().nullable().optional(),
+	permissionMode: z.enum(["readonly", "workspace", "full"]).optional(),
 });
 const createWorkspaceSchema = z.object({
 	path: z.string(),
@@ -187,20 +189,23 @@ export function createApp(
 		const parsed = createSessionSchema.safeParse(body);
 		if (!parsed.success) {
 			return c.json(
-				{ error: "body 需为 {cwd?: string, workspaceId?: string}" },
+				{
+					error:
+						"body 需为 {cwd?: string, workspaceId?: string | null, permissionMode?: readonly|workspace|full}",
+				},
 				400,
 			);
 		}
-		if (
-			parsed.data.cwd !== undefined &&
-			parsed.data.workspaceId !== undefined
-		) {
+		const { workspaceId, permissionMode } = parsed.data;
+		if (parsed.data.cwd !== undefined && typeof workspaceId === "string") {
 			return c.json({ error: "cwd 与 workspaceId 互斥，只能传其一" }, 400);
 		}
 		try {
 			// 工作区绑定：路径来自注册表记录（校验在 manager 内完成）
-			if (parsed.data.workspaceId !== undefined) {
-				const rec = await manager.createInWorkspace(parsed.data.workspaceId);
+			if (typeof workspaceId === "string") {
+				const rec = await manager.createInWorkspace(workspaceId, {
+					...(permissionMode === undefined ? {} : { permissionMode }),
+				});
 				return c.json({ id: rec.id }, 201);
 			}
 			// M2：显式 cwd 须 resolve 后存在且为目录，否则 400（缺省仍用 process.cwd()）
@@ -215,7 +220,11 @@ export function createApp(
 					return c.json({ error: `cwd 不存在: ${cwd}` }, 400);
 				}
 			}
-			const rec = await manager.create(cwd);
+			// workspaceId === null：草稿要求落「未分组」，跳过按 cwd 自动归属
+			const rec = await manager.create(cwd, {
+				...(permissionMode === undefined ? {} : { permissionMode }),
+				...(workspaceId === null ? { autoAttach: false } : {}),
+			});
 			return c.json({ id: rec.id }, 201);
 		} catch (err) {
 			if (err instanceof SessionApiError) {
@@ -454,6 +463,31 @@ export function createApp(
 		try {
 			const { path } = await manager.saveUpload(
 				rec.id,
+				parsed.data.name,
+				parsed.data.content,
+			);
+			return c.json({ path }, 201);
+		} catch (err) {
+			if (err instanceof SessionApiError) {
+				return c.json({ error: err.message }, err.status);
+			}
+			throw err;
+		}
+	});
+
+	// 草稿态附件上传（尚未创建会话）：写 <home>/uploads/drafts/<counter>-<净化名>。
+	// 附件在消息里以 @<绝对路径> 引用，会话创建后仍可被 read 工具读取
+	app.post("/api/uploads", async (c) => {
+		const body = await readJsonBody(c);
+		const parsed = uploadSchema.safeParse(body);
+		if (!parsed.success) {
+			return c.json(
+				{ error: "body 需为 {name: string, content: string}" },
+				400,
+			);
+		}
+		try {
+			const { path } = await manager.saveDraftUpload(
 				parsed.data.name,
 				parsed.data.content,
 			);

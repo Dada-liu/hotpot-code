@@ -179,6 +179,8 @@ const PERMISSION_MODE_VALUES: readonly string[] = [
 // M2 上传限制：单文件 ≤512KB、纯文本（无 NUL）、每会话 10 个
 const UPLOAD_MAX_BYTES = 512 * 1024;
 const UPLOAD_MAX_FILES = 10;
+// 草稿态是全局目录（尚未绑定会话），上限放宽到 100 个，防止无限增长
+const DRAFT_UPLOAD_MAX_FILES = 100;
 const UPLOAD_NAME_MAX = 120;
 // fs/ls 单次最多返回的目录项数
 const FS_MAX_ENTRIES = 500;
@@ -235,11 +237,22 @@ export interface SessionManagerOptions {
 	picker?: () => Promise<string | null>;
 }
 
+// 建会话选项：permissionMode 在装配后写入 holder 并落 permission/changed（草稿态
+// 里用户选的档位随首条消息一并生效）；autoAttach=false 时跳过按 cwd 自动归属
+// （web 要求「未分组」草稿落到未分组，即使默认 cwd 恰好命中某个工作区）
+export interface CreateSessionOptions {
+	permissionMode?: PermissionMode;
+	autoAttach?: boolean;
+}
+
 export interface SessionManager {
-	create(cwd: string): Promise<SessionRecord>;
+	create(cwd: string, opts?: CreateSessionOptions): Promise<SessionRecord>;
 	// 在工作区内建会话：取注册表记录的 path 作 cwd，创建成功后 attach；
 	// 未知 workspaceId 抛 SessionApiError(404)，路径失效抛 400
-	createInWorkspace(workspaceId: string): Promise<SessionRecord>;
+	createInWorkspace(
+		workspaceId: string,
+		opts?: Pick<CreateSessionOptions, "permissionMode">,
+	): Promise<SessionRecord>;
 	// 按会话 id 恢复（listSessions 找 filePath → resumeSession + foldInbox 播种），
 	// 未命中返回 null
 	attachById(id: string): Promise<SessionRecord | null>;
@@ -280,6 +293,9 @@ export interface SessionManager {
 		name: string,
 		content: string,
 	): Promise<{ path: string }>;
+	// 草稿态附件上传（尚未创建会话）：写 <home>/uploads/drafts/<counter>-<净化名>，
+	// 消息里以 @<绝对路径> 引用；会话创建后仍可读
+	saveDraftUpload(name: string, content: string): Promise<{ path: string }>;
 	// M2 工作区浏览（web @ 补全）：列 cwd 子目录直接子级（dirs 优先、上限 500）；
 	// relPath 支持绝对/相对，realpath 后越出 cwd 抛 SessionApiError(400)
 	listFs(id: string, relPath: string): Promise<{ entries: FsEntry[] }>;
@@ -1053,8 +1069,12 @@ export function createSessionManager(
 		await closeMcpConnections(m.mcpConnections);
 	}
 
-	// 建会话的统一入口（create 与 createInWorkspace 共用）：装配完成后按 cwd 自动归属
-	async function createAt(cwd: string): Promise<SessionRecord> {
+	// 建会话的统一入口（create 与 createInWorkspace 共用）：装配完成后按 opts.autoAttach
+	// （默认 true）决定是否按 cwd 自动归属；permissionMode 在装配后写入 holder 并落审计
+	async function createAt(
+		cwd: string,
+		createOpts?: CreateSessionOptions,
+	): Promise<SessionRecord> {
 		const settings = loadSettings({ cwd, home: opts.home });
 		const session = await createSession(cwd, opts.home);
 		const { meta } = await loadSession(session.filePath);
@@ -1070,16 +1090,69 @@ export function createSessionManager(
 			createdAt: meta.createdAt,
 			startedAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
 		});
+		// 草稿态选的权限档位随会话创建一并生效：先落 durable 审计再对外可见
+		if (createOpts?.permissionMode !== undefined) {
+			m.runtime.permissionMode.mode = createOpts.permissionMode;
+			await m.session.append({
+				type: "permission/changed",
+				id: randomUUID(),
+				ts: new Date().toISOString(),
+				mode: createOpts.permissionMode,
+				source: "user",
+			});
+		}
 		managed.set(m.id, m);
 		emitSessionStart(m, false);
-		await attachByPathQuiet(m.id, cwd);
+		if (createOpts?.autoAttach !== false) {
+			await attachByPathQuiet(m.id, cwd);
+		}
 		return recordOf(m);
+	}
+
+	// 附件落盘共用路径：NUL/大小校验 + 净化文件名 + 计数防覆盖（wx 独占创建）
+	async function storeUpload(
+		dir: string,
+		name: string,
+		content: string,
+		maxFiles: number,
+		overflowMessage: string,
+	): Promise<{ path: string }> {
+		// 纯文本校验：NUL 字节视为二进制（v1 附件只支持文本）
+		if (content.includes("\0")) {
+			throw new SessionApiError(
+				400,
+				"仅支持纯文本附件（内容含 NUL 字节，疑似二进制文件）",
+			);
+		}
+		if (new TextEncoder().encode(content).length > UPLOAD_MAX_BYTES) {
+			throw new SessionApiError(
+				413,
+				"附件内容超过 512KB 上限（v1 仅支持纯文本）",
+			);
+		}
+		const sanitized = sanitizeUploadName(name);
+		if (sanitized === "") {
+			throw new SessionApiError(400, "文件名非法（净化后为空）");
+		}
+		await mkdir(dir, { recursive: true });
+		// 计数取磁盘现状：重启后不与既有文件冲突；达到上限拒绝（413）
+		const existing = await readdir(dir);
+		if (existing.length >= maxFiles) {
+			throw new SessionApiError(413, overflowMessage);
+		}
+		const filePath = join(dir, `${existing.length + 1}-${sanitized}`);
+		// wx 独占创建：counter 递增已保证唯一，写时再加旗标兜底绝不覆盖
+		await writeFile(filePath, content, { encoding: "utf8", flag: "wx" });
+		return { path: filePath };
 	}
 
 	return {
 		create: createAt,
 
-		async createInWorkspace(workspaceId: string): Promise<SessionRecord> {
+		async createInWorkspace(
+			workspaceId: string,
+			workspaceOpts?: { permissionMode?: PermissionMode },
+		): Promise<SessionRecord> {
 			const workspace = await withRegistry((r) =>
 				Promise.resolve(r.list().find((w) => w.id === workspaceId)),
 			);
@@ -1095,7 +1168,11 @@ export function createSessionManager(
 				if (err instanceof SessionApiError) throw err;
 				throw new SessionApiError(400, `cwd 不存在: ${workspace.path}`);
 			}
-			const rec = await createAt(workspace.path);
+			const rec = await createAt(workspace.path, {
+				...(workspaceOpts?.permissionMode === undefined
+					? {}
+					: { permissionMode: workspaceOpts.permissionMode }),
+			});
 			// createAt 已按 realpath 自动归属；这里再显式挂一次保证契约（幂等，无写盘）
 			await withRegistry((r) => r.attachSession(workspace.id, rec.id));
 			return rec;
@@ -1238,34 +1315,29 @@ export function createSessionManager(
 			content: string,
 		): Promise<{ path: string }> {
 			const m = requireManaged(id);
-			// 纯文本校验：NUL 字节视为二进制（v1 附件只支持文本）
-			if (content.includes("\0")) {
-				throw new SessionApiError(
-					400,
-					"仅支持纯文本附件（内容含 NUL 字节，疑似二进制文件）",
-				);
-			}
-			if (new TextEncoder().encode(content).length > UPLOAD_MAX_BYTES) {
-				throw new SessionApiError(
-					413,
-					"附件内容超过 512KB 上限（v1 仅支持纯文本）",
-				);
-			}
-			const sanitized = sanitizeUploadName(name);
-			if (sanitized === "") {
-				throw new SessionApiError(400, "文件名非法（净化后为空）");
-			}
 			const dir = join(resolveHome(opts.home), "uploads", m.id);
-			await mkdir(dir, { recursive: true });
-			// 计数取磁盘现状：重启后不与既有文件冲突；达到上限拒绝（413）
-			const existing = await readdir(dir);
-			if (existing.length >= UPLOAD_MAX_FILES) {
-				throw new SessionApiError(413, "本会话上传文件数已达上限（10 个）");
-			}
-			const filePath = join(dir, `${existing.length + 1}-${sanitized}`);
-			// wx 独占创建：counter 递增已保证唯一，写时再加旗标兜底绝不覆盖
-			await writeFile(filePath, content, { encoding: "utf8", flag: "wx" });
-			return { path: filePath };
+			return storeUpload(
+				dir,
+				name,
+				content,
+				UPLOAD_MAX_FILES,
+				"本会话上传文件数已达上限（10 个）",
+			);
+		},
+
+		async saveDraftUpload(
+			name: string,
+			content: string,
+		): Promise<{ path: string }> {
+			// 草稿目录是全局的（还没有会话 id）；会话创建后消息里的绝对路径仍可读
+			const dir = join(resolveHome(opts.home), "uploads", "drafts");
+			return storeUpload(
+				dir,
+				name,
+				content,
+				DRAFT_UPLOAD_MAX_FILES,
+				"草稿附件数已达上限（100 个）",
+			);
 		},
 
 		async listFs(id: string, relPath: string): Promise<{ entries: FsEntry[] }> {

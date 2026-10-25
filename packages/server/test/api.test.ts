@@ -1684,6 +1684,75 @@ describe("工作区与目录选择器", () => {
 		expect(await membership()).not.toContain(id);
 	}, 20000);
 
+	it("草稿创建：permissionMode 随会话生效，workspaceId=null 跳过自动归属", async () => {
+		const fx = await startApi(scriptedAdapter([]), "workspace");
+		const { workspace } = await createWorkspace(fx.base, fx.proj);
+
+		// permissionMode 随创建写入：holder 反映 + 日志落 permission/changed
+		const created = await postJson(`${fx.base}/api/sessions`, {
+			permissionMode: "full",
+		});
+		expect(created.status).toBe(201);
+		const { id } = (await created.json()) as { id: string };
+		const perm = (await (
+			await fetch(`${fx.base}/api/sessions/${id}/permission`)
+		).json()) as { mode: string };
+		expect(perm.mode).toBe("full");
+		const detail = (await (
+			await fetch(`${fx.base}/api/sessions/${id}`)
+		).json()) as { filePath: string };
+		const { events } = await loadSession(detail.filePath);
+		expect(
+			events.some(
+				(e) =>
+					e.type === "permission/changed" &&
+					e.mode === "full" &&
+					e.source === "user",
+			),
+		).toBe(true);
+
+		// workspaceId=null：即使 cwd 命中已注册工作区也不归属（草稿落未分组）
+		const ungrouped = await postJson(`${fx.base}/api/sessions`, {
+			cwd: fx.proj,
+			workspaceId: null,
+		});
+		expect(ungrouped.status).toBe(201);
+		const ungroupedId = ((await ungrouped.json()) as { id: string }).id;
+		const list = await listWorkspaces(fx.base);
+		expect(
+			list.find((w) => w.id === workspace.id)?.sessionIds ?? [],
+		).not.toContain(ungroupedId);
+	}, 20000);
+
+	it("草稿附件上传：无需会话，写 uploads/drafts；NUL/超限 400·413", async () => {
+		const fx = await startApi(scriptedAdapter([]), "full");
+		const ok = await postJson(`${fx.base}/api/uploads`, {
+			name: "note.txt",
+			content: "hello draft\n",
+		});
+		expect(ok.status).toBe(201);
+		const { path } = (await ok.json()) as { path: string };
+		expect(path.endsWith(join("uploads", "drafts", "1-note.txt"))).toBe(true);
+		expect(await readFile(path, "utf8")).toBe("hello draft\n");
+
+		expect(
+			(
+				await postJson(`${fx.base}/api/uploads`, {
+					name: "bin.txt",
+					content: "a\0b",
+				})
+			).status,
+		).toBe(400);
+		expect(
+			(
+				await postJson(`${fx.base}/api/uploads`, {
+					name: "big.txt",
+					content: "x".repeat(512 * 1024 + 1),
+				})
+			).status,
+		).toBe(413);
+	}, 20000);
+
 	it("directory-picker 路由：路径/null/501 unavailable/504 timeout", async () => {
 		let mode: "path" | "null" | "unavailable" | "timeout" = "path";
 		const fx = await startApi(scriptedAdapter([]), "full", {
