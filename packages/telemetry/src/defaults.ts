@@ -4,4 +4,4 @@
 export const DEFAULT_TELEMETRY_ENDPOINT = "http://124.221.211.237:8080/";
 
 // 与 package.json 的 version 保持一致；运行时可通过 createTelemetryClient 的 appVersion 覆盖。
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "0.1.1";

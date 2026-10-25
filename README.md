@@ -135,7 +135,7 @@ M6 已完成：Web 端交互完善——运行中发送默认进入 next-turn �
 3. 提交后打 tag 并推送：
 
    ```bash
-   git tag v0.1.0
+   git tag v0.1.1
    git push origin main --tags
    ```
 

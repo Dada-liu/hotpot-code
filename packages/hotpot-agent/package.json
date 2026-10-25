@@ -1,6 +1,6 @@
 {
 	"name": "hotpot-agent",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A low-cost code agent with a terminal REPL and a local web UI.",
 	"private": false,
 	"type": "module",
