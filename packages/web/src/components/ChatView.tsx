@@ -639,30 +639,46 @@ function Composer({
 					</div>
 					<div className="flex items-center gap-1">
 						{showCancel && onCancel !== undefined && (
-							<Button
-								type="button"
-								variant="ghost"
-								size="icon"
-								className="rounded-full text-destructive hover:text-destructive"
-								onClick={onCancel}
-								aria-label="取消运行"
-							>
-								<Square className="size-4" />
-							</Button>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button
+										type="button"
+										variant="ghost"
+										size="icon"
+										className="rounded-full text-destructive hover:text-destructive"
+										onClick={onCancel}
+										aria-label="取消运行"
+									>
+										<Square className="size-4" />
+									</Button>
+								</TooltipTrigger>
+								{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+								<TooltipContent side="top" sideOffset={0}>
+									取消运行
+								</TooltipContent>
+							</Tooltip>
 						)}
-						<Button
-							type="submit"
-							size="icon"
-							className="rounded-full"
-							disabled={draft.trim() === "" && attachments.length === 0}
-							aria-label={running ? "排队" : "发送"}
-						>
-							{running ? (
-								<ListPlus className="size-4" />
-							) : (
-								<Send className="size-4" />
-							)}
-						</Button>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button
+									type="submit"
+									size="icon"
+									className="rounded-full"
+									disabled={draft.trim() === "" && attachments.length === 0}
+									aria-label={running ? "排队" : "发送"}
+								>
+									{running ? (
+										<ListPlus className="size-4" />
+									) : (
+										<Send className="size-4" />
+									)}
+								</Button>
+							</TooltipTrigger>
+							{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+							<TooltipContent side="top" sideOffset={0}>
+								{running ? "排队" : "发送"}
+							</TooltipContent>
+						</Tooltip>
 					</div>
 				</div>
 			</div>
