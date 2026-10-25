@@ -139,7 +139,13 @@ function SessionRow({
 		}
 	}, []);
 	const nameSpan = (
-		<span ref={measureName} key={name} className="block truncate text-sm">
+		// w-full 是打点的前提：父级 flex-col + items-start 会让 span 收缩到内容宽度，
+		// 没有宽度约束时 truncate 永远不生效（scrollWidth === clientWidth）
+		<span
+			ref={measureName}
+			key={name}
+			className="block w-full truncate text-sm"
+		>
 			{name}
 		</span>
 	);
@@ -210,7 +216,8 @@ function SessionRow({
 							<ChevronDown className="size-3.5 transition-transform duration-200 [[data-state=open]_&]:rotate-180" />
 						</button>
 					</DropdownMenuTrigger>
-					<DropdownMenuContent side="left" align="start" sideOffset={4}>
+					{/* 会话行操作弹窗开在侧栏右侧（侧栏之外），不遮挡侧栏内容 */}
+					<DropdownMenuContent side="right" align="start" sideOffset={16}>
 						{running ? (
 							<DropdownMenuItem
 								className="gap-2"
@@ -261,6 +268,8 @@ interface SessionListProps {
 	onNewSessionIn: (workspaceId: string) => void;
 	onNewSessionGlobal: () => void;
 	onAddWorkspace: () => void;
+	// 原生选择器请求在途：禁用「添加工作区」入口，防止重复弹系统对话框
+	addWorkspaceBusy?: boolean;
 	// 失败时 reject，由弹窗展示服务端 message
 	onRenameWorkspace: (id: string, title: string) => Promise<void>;
 	onDeleteWorkspace: (id: string) => Promise<void>;
@@ -280,6 +289,7 @@ export function SessionList({
 	onNewSessionIn,
 	onNewSessionGlobal,
 	onAddWorkspace,
+	addWorkspaceBusy = false,
 	onRenameWorkspace,
 	onDeleteWorkspace,
 	onReorderWorkspaces,
@@ -449,16 +459,17 @@ export function SessionList({
 								<TooltipTrigger asChild>
 									<button
 										type="button"
-										aria-label="新建工作区"
-										className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+										aria-label="添加工作区"
+										className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+										disabled={addWorkspaceBusy}
 										onClick={onAddWorkspace}
 									>
 										<FolderPlus className="size-3.5" />
 									</button>
 								</TooltipTrigger>
-								{/* 气泡推到分类行右侧（侧栏之外），不遮挡分类名与行内按钮 */}
-								<TooltipContent side="right" sideOffset={24}>
-									新建工作区
+								{/* 图标按钮规则：气泡在 svg 上方 4px（见 web AGENTS.md） */}
+								<TooltipContent side="top" sideOffset={4}>
+									请选择文件夹作为工作区
 								</TooltipContent>
 							</Tooltip>
 						)}
@@ -470,10 +481,11 @@ export function SessionList({
 								variant="outline"
 								size="sm"
 								className="border-border-strong bg-background"
+								disabled={addWorkspaceBusy}
 								onClick={onAddWorkspace}
 							>
 								<FolderPlus className="size-3.5" />
-								新建工作区
+								添加工作区
 							</Button>
 						</div>
 					)}
@@ -559,8 +571,8 @@ export function SessionList({
 												<Plus className="size-3.5" />
 											</button>
 										</TooltipTrigger>
-										{/* 气泡推到「…」按钮之外（侧栏之外），不遮挡行内操作 */}
-										<TooltipContent side="right" sideOffset={40}>
+										{/* 图标按钮规则：气泡在 svg 上方 4px（见 web AGENTS.md） */}
+										<TooltipContent side="top" sideOffset={4}>
 											新建会话
 										</TooltipContent>
 									</Tooltip>

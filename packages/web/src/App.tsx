@@ -14,6 +14,7 @@ import {
 	archiveSession,
 	cancelTurn,
 	createSession,
+	createWorkspace,
 	deleteSession,
 	deleteWorkspace,
 	getInbox,
@@ -21,7 +22,9 @@ import {
 	listPrompts,
 	listSessions,
 	listWorkspaces,
+	PickerUnavailableError,
 	type PromptInfo,
+	pickDirectory,
 	removeQueued,
 	renameWorkspace,
 	reorderWorkspaces,
@@ -79,7 +82,10 @@ export function App() {
 	const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(
 		null,
 	);
+	// 降级弹窗：仅系统原生选择器不可用时打开（手动输入路径）
 	const [pickerOpen, setPickerOpen] = useState(false);
+	// 原生选择器请求在途：禁用「添加工作区」入口，防止重复弹系统对话框
+	const [addWorkspaceBusy, setAddWorkspaceBusy] = useState(false);
 	const [names, setNames] = useState<Record<string, string>>(loadSessionNames);
 	const [chat, dispatch] = useReducer(
 		reduceChatAction,
@@ -202,7 +208,7 @@ export function App() {
 			currentId === null ? null : workspaceForSession(workspaces, currentId);
 		const target = currentWorkspace ?? workspaces[0] ?? null;
 		if (target === null) {
-			setPickerOpen(true);
+			void handleAddWorkspace();
 			return;
 		}
 		enterPending(target.id);
@@ -217,6 +223,32 @@ export function App() {
 		setPickerOpen(false);
 		void refreshWorkspaces();
 		enterPending(workspace.id);
+	};
+
+	// 「添加工作区」直连系统原生选择器：选中即注册，不弹自定义中间弹窗。
+	// 仅当宿主环境没有原生后端（501）时才打开手动输入路径的降级弹窗。
+	const handleAddWorkspace = async (): Promise<void> => {
+		if (addWorkspaceBusy) {
+			return;
+		}
+		setAddWorkspaceBusy(true);
+		try {
+			const { path } = await pickDirectory();
+			if (path === null) {
+				return; // 用户取消
+			}
+			const { workspace } = await createWorkspace(path);
+			handleWorkspaceCreated(workspace);
+			setError(null);
+		} catch (e) {
+			if (e instanceof PickerUnavailableError) {
+				setPickerOpen(true);
+				return;
+			}
+			setError(errorMessage(e));
+		} finally {
+			setAddWorkspaceBusy(false);
+		}
 	};
 
 	// 重命名失败向上抛，由侧栏弹窗展示服务端 message
@@ -506,8 +538,9 @@ export function App() {
 					onNewSessionIn={handleNewSessionIn}
 					onNewSessionGlobal={handleCreateGlobal}
 					onAddWorkspace={() => {
-						setPickerOpen(true);
+						void handleAddWorkspace();
 					}}
+					addWorkspaceBusy={addWorkspaceBusy}
 					onRenameWorkspace={handleRenameWorkspace}
 					onDeleteWorkspace={handleDeleteWorkspace}
 					onReorderWorkspaces={handleReorderWorkspaces}
@@ -526,6 +559,7 @@ export function App() {
 					open={pickerOpen}
 					onOpenChange={setPickerOpen}
 					onCreated={handleWorkspaceCreated}
+					startInManual
 				/>
 				<div className="flex min-w-0 flex-1 flex-col">
 					<header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">

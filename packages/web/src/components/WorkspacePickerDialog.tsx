@@ -1,4 +1,5 @@
-// 添加工作区弹窗：打开即调用系统原生目录选择器（POST /api/directory-picker/pick）。
+// 工作区降级弹窗：仅在系统原生选择器不可用（501）时使用，直接展示手填路径输入。
+// 保留 pick 模式（startInManual=false）供其他入口复用：
 // - 选中目录 → POST /api/workspaces（重复路径返回既有记录）→ onCreated 后关闭；
 // - 用户取消（path=null）→ 静默关闭；
 // - 501 / picker-unavailable → 降级为手填路径（同一创建接口）；
@@ -34,12 +35,15 @@ interface WorkspacePickerDialogProps {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onCreated: (workspace: WorkspaceWire) => void;
+	// true：打开即进入手填路径模式（宿主已确认没有原生选择器）
+	startInManual?: boolean;
 }
 
 export function WorkspacePickerDialog({
 	open,
 	onOpenChange,
 	onCreated,
+	startInManual = false,
 }: WorkspacePickerDialogProps): ReactElement {
 	const [phase, setPhase] = useState<Phase>("picking");
 	const [error, setError] = useState<string | null>(null);
@@ -67,12 +71,17 @@ export function WorkspacePickerDialog({
 			return;
 		}
 		startedFor.current = attempt;
+		setManualError(null);
+		// 降级入口：宿主已确认没有原生选择器，直接进入手填路径
+		if (startInManual) {
+			setPhase("manual");
+			return;
+		}
 		const gen = requestGen.current + 1;
 		requestGen.current = gen;
 		const alive = (): boolean => requestGen.current === gen;
 		setPhase("picking");
 		setError(null);
-		setManualError(null);
 		void pickDirectory()
 			.then(async ({ path }) => {
 				if (!alive()) {
