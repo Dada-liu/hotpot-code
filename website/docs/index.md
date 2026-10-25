@@ -1,9 +1,9 @@
 ---
 pageType: home
 hero:
-  name: hotpot-agent
+  name: HotPot Agent
   text: 更低的成本，更好的效果
-  tagline: 基于 Node + TypeScript 的 code agent：分层模型路由、三层 agent 编排、JSONL 会话日志可完整恢复
+  tagline: 分层模型路由、三层 agent 编排、JSONL 会话日志可完整恢复
   actions:
     - theme: brand
       text: 快速开始
@@ -23,13 +23,13 @@ features:
     details: trivial / simple / complex 任务分别路由到 high / medium / low 档位，按 token 消耗与成功率量化每一档的收益。
   - icon: /icons/log.svg
     title: 会话日志即唯一事实源
-    details: append-only JSONL 事件日志，deriveMessages 从中转换出模型历史；进程被 kill 后也能从日志折叠恢复、继续对话。
+    details: append-only JSONL 事件日志，deriveMessages 从中转换出模型历史；进程被杀、断线重连后都能折叠恢复、继续对话。
   - icon: /icons/shield.svg
-    title: 审批 waterfall
-    details: 高危命令与覆盖写先询问后执行，默认 fail-closed；plan 必须批准才有文件改动，asked / decided 全程落盘可审计。
+    title: 三档权限与审批
+    details: 只读 / 工作区 / 完全三档权限；main 只读工具、worker 按档位放行；高危命令与覆盖写先询问，asked / decided 全程落盘可审计。
   - icon: /icons/monitor.svg
-    title: Web 端
-    details: hotpot web 一键启动，REST + SSE 流式会话；工具卡片、plan 审查、steer / 中断、用量展示，与 CLI 同时观察同一会话。
+    title: Web 工作区与面板
+    details: hotpot web 一键启动；工作区按目录分组会话并支持拖拽排序；排队优先输入框、附件与 @ 文件提及；agent 面板展示任务清单与用量。
   - icon: /icons/target.svg
     title: Benchmark 驱动
     details: SWE-bench Lite 10 题 9/10 通过（patch-only 基线），单题 token 与耗时进报告；任何增加开销的功能都必须用数据证明收益。

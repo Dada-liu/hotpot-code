@@ -70,30 +70,33 @@ html.dark img[src*="logo.png"] {
 	filter: invert(1) hue-rotate(180deg);
 }
 
-/* hero 右侧图：默认展示 logo，悬浮时切换为三层 agent 组合 */
+/* hero 右侧图：默认展示三层 agent 组合，悬浮时切换为 logo */
 .hero-team {
 	position: relative;
-	width: min(100%, 400px);
+	inline-size: min(100%, 400px);
 	margin: 0 auto;
 	aspect-ratio: 1;
 }
 
+/* logo 默认隐藏，悬浮时淡入 */
 .hero-team__logo {
 	position: absolute;
 	inset: 0;
-	width: 100%;
-	height: 100%;
+	inline-size: 100%;
+	block-size: 100%;
 	object-fit: contain;
+	opacity: 0;
+	transform: scale(0.92);
 	transition:
 		opacity 0.3s ease,
 		transform 0.3s ease;
 }
 
-/* 三张 agent 图默认隐藏，悬浮时淡入上浮 */
+/* 三张 agent 图默认展示，悬浮时淡出下沉 */
 .hero-team__agent {
 	position: absolute;
-	opacity: 0;
-	transform: translateY(10px) scale(0.96);
+	opacity: 1;
+	transform: none;
 	transition:
 		opacity 0.3s ease,
 		transform 0.3s ease;
@@ -106,7 +109,6 @@ html.dark img[src*="logo.png"] {
 	left: 12%;
 	width: 76%;
 	z-index: 1;
-	transition-delay: 0.12s;
 }
 
 /* work / task 在下方，叠在 main 之上 */
@@ -122,21 +124,122 @@ html.dark img[src*="logo.png"] {
 	right: 0;
 	width: 50%;
 	z-index: 3;
-	transition-delay: 0.06s;
 }
 
 .hero-team:hover .hero-team__logo {
-	opacity: 0;
-	transform: scale(0.92);
+	opacity: 1;
+	transform: scale(1);
+	transition-delay: 0.12s;
 }
 
 .hero-team:hover .hero-team__agent {
-	opacity: 1;
-	transform: translateY(0) scale(1);
+	opacity: 0;
+	transform: translateY(10px) scale(0.96);
 }
 
 /* 深色模式下 agent 黑线转白（与 logo 同一处理） */
 html.rp-dark .hero-team__agent,
 html.dark .hero-team__agent {
 	filter: invert(1) hue-rotate(180deg);
+}
+
+/* 博客页：隐藏左右侧栏与目录，并让正文在无 aside 时居中 */
+.rp-doc-layout__container:has(.blog-list) .rp-doc-layout__sidebar,
+.rp-doc-layout__container:has(.blog-list) .rp-doc-layout__outline {
+	display: none;
+}
+
+.rp-doc-layout__container:has(.blog-list) .rp-doc-layout__doc {
+	margin-inline: auto;
+}
+
+/* 博客列表：docs/blog.mdx 的 posts 数组渲染为行列表 */
+.blog-list {
+	display: flex;
+	flex-direction: column;
+	margin-block: 24px;
+}
+
+.blog-list .blog-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 24px;
+	padding: 18px 20px;
+	border-radius: 10px;
+	color: inherit;
+	text-decoration: none;
+	transition:
+		background-color 0.2s ease,
+		box-shadow 0.2s ease;
+}
+
+.blog-list .blog-row:hover {
+	background: var(--rp-c-brand-tint);
+}
+
+.blog-list .blog-row:focus-visible {
+	outline: 2px solid var(--rp-c-brand);
+	outline-offset: 2px;
+}
+
+.blog-row__main {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-inline-size: 0;
+}
+
+.blog-list .blog-row__title {
+	color: var(--rp-c-text-1);
+	font-size: 1.0625rem;
+	font-weight: 600;
+	line-height: 1.4;
+	transition: color 0.2s ease;
+}
+
+.blog-list .blog-row__summary {
+	color: var(--rp-c-text-2);
+	font-size: 0.9375rem;
+	line-height: 1.6;
+	transition: color 0.2s ease;
+}
+
+.blog-row__meta {
+	display: flex;
+	flex: none;
+	align-items: center;
+	color: var(--rp-c-text-2);
+	font-size: 0.875rem;
+}
+
+.blog-list .blog-row:hover .blog-row__title {
+	color: var(--rp-c-brand);
+}
+
+.blog-list .blog-row:hover .blog-row__summary {
+	color: var(--rp-c-text-1);
+}
+
+@media (max-width: 640px) {
+	.blog-list .blog-row {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.hero-team__logo,
+	.hero-team__agent,
+	.blog-list .blog-row,
+	.blog-list .blog-row__title,
+	.blog-list .blog-row__summary {
+		transition: none;
+	}
+
+	.hero-team:hover .hero-team__logo,
+	.hero-team:hover .hero-team__agent {
+		transform: none;
+	}
 }

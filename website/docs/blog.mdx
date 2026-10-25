@@ -1,0 +1,32 @@
+---
+title: 博客
+description: HotPot Agent 的发布记录、工程实践与跑批复盘
+---
+
+import { Link } from "@rspress/core/theme-original";
+
+export const posts = [
+	{
+		title: "Agent 的上限在哪里",
+		date: "2026-10-25",
+		summary:
+			"从翻译任务的模型选择讲起：为什么用哪个模型、要不要进 plan 模式这些判断不该消耗人脑，以及 hotpot agent 如何用 main / work / task 三层结构减少人类的意图与判断消耗。",
+		url: "https://dada-liu.github.io/#blog/where-is-the-upper-limit-of-agent",
+	},
+];
+
+# 博客
+
+<div className="blog-list">
+	{posts.map((post) => (
+		<Link className="blog-row" href={post.url} key={post.title}>
+			<span className="blog-row__main">
+				<span className="blog-row__title">{post.title}</span>
+				<span className="blog-row__summary">{post.summary}</span>
+			</span>
+			<span className="blog-row__meta">
+				<time className="blog-row__date">{post.date}</time>
+			</span>
+		</Link>
+	))}
+</div>

@@ -1,6 +1,6 @@
 import { defineConfig } from "@rspress/core";
 
-// hotpot-agent 官网配置：结构参考 https://rspress.rs/zh/（首页 + 指南 + 深入 + 更新日志）
+// hotpot-agent 官网配置：结构参考 https://rspress.rs/zh/（首页 + 指南 + 深入 + 博客 + 更新日志）
 export default defineConfig({
 	// 站点内容根目录（Markdown 源文件）
 	root: "docs",
@@ -15,6 +15,7 @@ export default defineConfig({
 	lang: "zh",
 	icon: "/logo.png",
 	logo: "/logo.png",
+	logoText: "HotPot",
 	themeConfig: {
 		// 顶部导航
 		nav: [
@@ -27,6 +28,11 @@ export default defineConfig({
 				text: "深入",
 				link: "/advanced/architecture",
 				activeMatch: "^/advanced/",
+			},
+			{
+				text: "博客",
+				link: "/blog",
+				activeMatch: "^/blog",
 			},
 			{
 				text: "更新日志",
