@@ -1,9 +1,9 @@
-// 左栏：工作区浏览器。侧栏头（logo + 全局新建会话 + 添加工作区），正文按
-// GET /api/workspaces 注册顺序分组；组头可展开/收起（localStorage 持久化）、
-// 可拖拽排序（HTML5 DnD → PUT /api/workspaces/order），hover 露出「+」新建会话
-// 与「…」重命名/删除。未归属任何工作区的会话渲染在末尾「未分组」。
-// 会话行复用原样式：名称（localStorage 显示名、打点 tooltip 带 cwd）、运行点、
-// 创建时间、行尾归档/删除下拉（运行中归档、空闲删除，二次确认）。
+// 左栏：工作区浏览器。侧栏头（logo），正文分「工作区」与「未分组」两个分类：
+// - 「工作区」分类名右侧在有工作区时挂「新建工作区」图标按钮（无工作区时按钮在空态里）
+// - 工作区行可展开/收起（localStorage 持久化）、可拖拽排序（HTML5 DnD →
+//   PUT /api/workspaces/order），hover 露出「+ 新建会话」与「…」重命名/删除
+// - 会话行 = 统一 hover/active 容器的行体 + 行尾归档/删除下拉（运行中归档、空闲删除，
+//   二次确认）；会话名与工作区名的 tooltip 用 sideOffset 推到侧栏之外，避免遮挡行内按钮
 // 底部功能按钮区：设置（弹设置弹窗，见 SettingsDialog）。
 
 import {
@@ -145,100 +145,108 @@ function SessionRow({
 	);
 
 	return (
-		<li className="group flex items-center">
-			<button
-				type="button"
+		<li className="group">
+			{/* 行体与右侧操作钮同处一个容器：hover/active 底色覆盖整行（含按钮区域） */}
+			<div
 				className={cn(
-					"min-w-0 flex-1 rounded-lg px-2 py-2 text-left transition-colors",
+					"flex items-center rounded-lg transition-colors",
 					active ? "bg-primary text-primary-foreground" : "hover:bg-accent",
 				)}
-				onClick={() => {
-					onSelect(session.id);
-				}}
 			>
-				{/* tooltip 常驻展示 cwd（工作区上下文已由分组表达，行内不再占一行副标题） */}
-				<Tooltip>
-					<TooltipTrigger asChild>{nameSpan}</TooltipTrigger>
-					<TooltipContent
-						side="right"
-						className="max-w-72 break-all font-normal"
-					>
-						{truncated && <span className="block font-medium">{name}</span>}
-						<span className="block">{session.cwd}</span>
-					</TooltipContent>
-				</Tooltip>
-				<span
-					className={cn(
-						"mt-0.5 flex items-center gap-1.5 text-[11px]",
-						active ? "text-primary-foreground/60" : "text-muted-foreground",
-					)}
+				<button
+					type="button"
+					className="flex min-w-0 flex-1 flex-col items-start px-2 py-2 text-left"
+					onClick={() => {
+						onSelect(session.id);
+					}}
 				>
+					{/* tooltip 常驻展示 cwd（工作区上下文已由分组表达，行内不再占一行副标题）。
+					    sideOffset 把气泡推到「行体 + 行尾按钮 + 侧栏内边距」之外：
+					    行尾按钮 24px + 间距/内边距约 12px，取 48 保证气泡落在侧栏之外 */}
+					<Tooltip>
+						<TooltipTrigger asChild>{nameSpan}</TooltipTrigger>
+						<TooltipContent
+							side="right"
+							sideOffset={48}
+							className="max-w-72 break-all font-normal"
+						>
+							{truncated && <span className="block font-medium">{name}</span>}
+							<span className="block">{session.cwd}</span>
+						</TooltipContent>
+					</Tooltip>
 					<span
 						className={cn(
-							"size-1.5 rounded-full",
-							running ? "bg-brand" : "bg-current opacity-40",
-						)}
-					/>
-					{formatTime(session.createdAt)}
-				</span>
-			</button>
-			<DropdownMenu
-				onOpenChange={(open) => {
-					if (!open) {
-						setConfirming(false);
-					}
-				}}
-			>
-				<DropdownMenuTrigger asChild>
-					<button
-						type="button"
-						aria-label="会话操作"
-						className={cn(
-							"flex size-6 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
-							active
-								? "text-primary-foreground/70 hover:text-primary-foreground"
-								: "text-muted-foreground hover:text-foreground",
+							"mt-0.5 flex items-center gap-1.5 text-[11px]",
+							active ? "text-primary-foreground/60" : "text-muted-foreground",
 						)}
 					>
-						<ChevronDown className="size-3.5 transition-transform duration-200 [[data-state=open]_&]:rotate-180" />
-					</button>
-				</DropdownMenuTrigger>
-				<DropdownMenuContent side="left" align="start" sideOffset={4}>
-					{running ? (
-						<DropdownMenuItem
-							className="gap-2"
-							onSelect={(e) => {
-								if (!confirming) {
-									// 首次点击：拦截默认的选单即关行为，停留在确认态
-									e.preventDefault();
-									setConfirming(true);
-									return;
-								}
-								onArchive(session.id);
-							}}
+						<span
+							className={cn(
+								"size-1.5 rounded-full",
+								running ? "bg-brand" : "bg-current opacity-40",
+							)}
+						/>
+						{formatTime(session.createdAt)}
+					</span>
+				</button>
+				<DropdownMenu
+					onOpenChange={(open) => {
+						if (!open) {
+							setConfirming(false);
+						}
+					}}
+				>
+					<DropdownMenuTrigger asChild>
+						<button
+							type="button"
+							aria-label="会话操作"
+							className={cn(
+								"mr-1 flex size-6 shrink-0 items-center justify-center rounded-md opacity-0 transition-[opacity,background-color,color] group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
+								active
+									? "text-primary-foreground/70 hover:bg-primary-foreground/15 hover:text-primary-foreground"
+									: "text-muted-foreground hover:bg-accent-foreground/10 hover:text-foreground",
+							)}
 						>
-							<Archive className="size-3.5" />
-							{confirming ? "再次点击确认归档" : "归档"}
-						</DropdownMenuItem>
-					) : (
-						<DropdownMenuItem
-							variant="destructive"
-							className="gap-2"
-							onSelect={(e) => {
-								if (!confirming) {
-									e.preventDefault();
-									setConfirming(true);
-									return;
-								}
-								onDelete(session.id);
-							}}
-						>
-							<Trash2 className="size-3.5" />
-							{confirming ? "再次点击确认删除" : "删除会话"}
-						</DropdownMenuItem>
-					)}
-				</DropdownMenuContent>
-			</DropdownMenu>
+							<ChevronDown className="size-3.5 transition-transform duration-200 [[data-state=open]_&]:rotate-180" />
+						</button>
+					</DropdownMenuTrigger>
+					<DropdownMenuContent side="left" align="start" sideOffset={4}>
+						{running ? (
+							<DropdownMenuItem
+								className="gap-2"
+								onSelect={(e) => {
+									if (!confirming) {
+										// 首次点击：拦截默认的选单即关行为，停留在确认态
+										e.preventDefault();
+										setConfirming(true);
+										return;
+									}
+									onArchive(session.id);
+								}}
+							>
+								<Archive className="size-3.5" />
+								{confirming ? "再次点击确认归档" : "归档"}
+							</DropdownMenuItem>
+						) : (
+							<DropdownMenuItem
+								variant="destructive"
+								className="gap-2"
+								onSelect={(e) => {
+									if (!confirming) {
+										e.preventDefault();
+										setConfirming(true);
+										return;
+									}
+									onDelete(session.id);
+								}}
+							>
+								<Trash2 className="size-3.5" />
+								{confirming ? "再次点击确认删除" : "删除会话"}
+							</DropdownMenuItem>
+						)}
+					</DropdownMenuContent>
+				</DropdownMenu>
+			</div>
 		</li>
 	);
 }
@@ -418,16 +426,6 @@ export function SessionList({
 					className="h-8 w-8 rounded-lg object-contain"
 				/>
 				<span className="text-base font-semibold tracking-tight">hotpot</span>
-				<span className="flex-1" />
-				<Button
-					variant="ghost"
-					size="icon-sm"
-					className="text-muted-foreground"
-					aria-label="添加工作区"
-					onClick={onAddWorkspace}
-				>
-					<FolderPlus className="size-4" />
-				</Button>
 			</div>
 			<div className="px-3 pb-2 pt-3">
 				<Button
@@ -441,8 +439,32 @@ export function SessionList({
 			</div>
 			<ScrollArea className="min-h-0 flex-1">
 				<div className="flex flex-col gap-1 px-2 pb-3 pt-1">
+					{/* 「工作区」分类头：与「未分组」同款样式；有工作区时右侧同行挂新建按钮 */}
+					<div className="flex items-center justify-between px-3 pb-1 pt-2">
+						<span className="text-xs font-medium text-muted-foreground">
+							工作区
+						</span>
+						{workspaces.length > 0 && (
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<button
+										type="button"
+										aria-label="新建工作区"
+										className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+										onClick={onAddWorkspace}
+									>
+										<FolderPlus className="size-3.5" />
+									</button>
+								</TooltipTrigger>
+								{/* 气泡推到分类行右侧（侧栏之外），不遮挡分类名与行内按钮 */}
+								<TooltipContent side="right" sideOffset={24}>
+									新建工作区
+								</TooltipContent>
+							</Tooltip>
+						)}
+					</div>
 					{workspaces.length === 0 && (
-						<div className="flex flex-col items-center gap-3 px-4 py-8 text-center">
+						<div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
 							<p className="text-xs text-muted-foreground">还没有工作区</p>
 							<Button
 								variant="outline"
@@ -451,7 +473,7 @@ export function SessionList({
 								onClick={onAddWorkspace}
 							>
 								<FolderPlus className="size-3.5" />
-								添加工作区
+								新建工作区
 							</Button>
 						</div>
 					)}
@@ -508,32 +530,40 @@ export function SessionList({
 										/>
 									</button>
 									<Folder className="size-3.5 shrink-0 text-muted-foreground" />
+									{/* 路径 tooltip：sideOffset 越过「+ / …」两个行尾按钮与内边距，
+									    气泡落在侧栏之外，不遮挡按钮 */}
 									<Tooltip>
 										<TooltipTrigger asChild>
-											<span
-												className="min-w-0 flex-1 truncate text-sm font-semibold"
-												title={workspace.path}
-											>
+											<span className="min-w-0 flex-1 truncate text-sm font-semibold">
 												{workspace.title}
 											</span>
 										</TooltipTrigger>
 										<TooltipContent
 											side="right"
+											sideOffset={72}
 											className="max-w-72 break-all font-normal"
 										>
 											{workspace.path}
 										</TooltipContent>
 									</Tooltip>
-									<button
-										type="button"
-										aria-label="在此工作区新建会话"
-										className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/workspace:opacity-100"
-										onClick={() => {
-											onNewSessionIn(workspace.id);
-										}}
-									>
-										<Plus className="size-3.5" />
-									</button>
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<button
+												type="button"
+												aria-label="在此工作区新建会话"
+												className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-[opacity,background-color,color] hover:bg-accent-foreground/10 hover:text-foreground focus-visible:opacity-100 group-hover/workspace:opacity-100"
+												onClick={() => {
+													onNewSessionIn(workspace.id);
+												}}
+											>
+												<Plus className="size-3.5" />
+											</button>
+										</TooltipTrigger>
+										{/* 气泡推到「…」按钮之外（侧栏之外），不遮挡行内操作 */}
+										<TooltipContent side="right" sideOffset={40}>
+											新建会话
+										</TooltipContent>
+									</Tooltip>
 									<DropdownMenu>
 										<DropdownMenuTrigger asChild>
 											<button
