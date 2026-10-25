@@ -35,6 +35,7 @@ import {
 	listFs,
 	type PermissionMode,
 	type PromptInfo,
+	uploadDraftFile,
 	uploadFile,
 } from "../api.ts";
 import {
@@ -359,13 +360,14 @@ function Composer({
 			});
 		}
 		setAttachError(notice);
-		if (sessionId === null) {
-			return;
-		}
 		for (const a of accepted) {
 			try {
 				const content = await readText(a.file);
-				const { path } = await uploadFile(sessionId, a.name, content);
+				// 草稿态（未创建会话）走全局 drafts 上传；会话内走会话附件目录
+				const { path } =
+					sessionId === null
+						? await uploadDraftFile(a.name, content)
+						: await uploadFile(sessionId, a.name, content);
 				const key = ++chipKey.current;
 				setAttachments((prev) => [
 					...prev,
@@ -442,14 +444,13 @@ function Composer({
 		}
 	};
 
-	// 附件按钮：统一用回形针图标（与「新建」类加号区分）；无会话禁用并提示先创建
+	// 附件按钮：任何时候可用（草稿态上传到全局 drafts 目录）
 	const attachButton = (
 		<Button
 			type="button"
 			variant="ghost"
 			size="icon"
 			className="rounded-full"
-			disabled={!hasSession}
 			onClick={() => {
 				fileInputRef.current?.click();
 			}}
@@ -623,25 +624,13 @@ function Composer({
 								void onPickFiles(e);
 							}}
 						/>
-						{hasSession ? (
-							<Tooltip>
-								<TooltipTrigger asChild>{attachButton}</TooltipTrigger>
-								{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
-								<TooltipContent side="top" sideOffset={0}>
-									添加附件
-								</TooltipContent>
-							</Tooltip>
-						) : (
-							<Tooltip>
-								<TooltipTrigger asChild>
-									{/* 禁用按钮不触发 hover：包一层 span 承载 tooltip */}
-									<span className="inline-flex">{attachButton}</span>
-								</TooltipTrigger>
-								<TooltipContent side="top" sideOffset={0}>
-									先创建会话
-								</TooltipContent>
-							</Tooltip>
-						)}
+						<Tooltip>
+							<TooltipTrigger asChild>{attachButton}</TooltipTrigger>
+							{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+							<TooltipContent side="top" sideOffset={0}>
+								添加附件
+							</TooltipContent>
+						</Tooltip>
 					</div>
 					<Button
 						type="submit"
@@ -975,7 +964,6 @@ export function ChatView({
 						hasSession={false}
 						sessionId={null}
 						permissionMode={permissionMode}
-						permissionDisabled
 						onPermissionChange={onPermissionChange}
 						onSend={onSend}
 					/>

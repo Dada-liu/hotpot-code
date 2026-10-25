@@ -258,11 +258,43 @@ function SessionRow({
 	);
 }
 
+// 临时会话（草稿）：未持久化，固定名「新会话」；点击进入草稿态，无行尾操作
+function DraftRow({
+	active,
+	onSelect,
+}: {
+	active: boolean;
+	onSelect: () => void;
+}): ReactElement {
+	return (
+		<li>
+			<div
+				className={cn(
+					"flex items-center rounded-lg transition-colors",
+					active ? "bg-primary text-primary-foreground" : "hover:bg-accent",
+				)}
+			>
+				<button
+					type="button"
+					className="flex min-w-0 flex-1 items-center px-2 py-2 text-left"
+					onClick={onSelect}
+				>
+					<span className="block w-full truncate text-sm">新会话</span>
+				</button>
+			</div>
+		</li>
+	);
+}
+
 interface SessionListProps {
 	workspaces: WorkspaceWire[];
 	sessions: SessionSummary[];
 	currentId: string | null;
-	pendingWorkspaceId: string | null;
+	// 临时会话（草稿）：workspaceId=null 表示渲染在「未分组」下
+	draft: { id: string; workspaceId: string | null } | null;
+	// 草稿态当前是否被选中（App 的 currentId === null 且存在 draft）
+	draftActive: boolean;
+	onSelectDraft: () => void;
 	nameFor: (s: SessionSummary) => string;
 	onSelect: (id: string) => void;
 	onNewSessionIn: (workspaceId: string) => void;
@@ -283,7 +315,9 @@ export function SessionList({
 	workspaces,
 	sessions,
 	currentId,
-	pendingWorkspaceId,
+	draft,
+	draftActive,
+	onSelectDraft,
 	nameFor,
 	onSelect,
 	onNewSessionIn,
@@ -314,9 +348,10 @@ export function SessionList({
 			? null
 			: (workspaceForSession(workspaces, currentId)?.id ?? null);
 
-	// 当前会话/待建会话所在组自动展开：清掉持久化里的过期折叠状态
+	// 当前会话/草稿所在组自动展开：清掉持久化里的过期折叠状态
 	useEffect(() => {
-		const activeId = currentWorkspaceId ?? pendingWorkspaceId;
+		const activeId =
+			currentWorkspaceId ?? (draftActive ? (draft?.workspaceId ?? null) : null);
 		if (activeId === null) {
 			return;
 		}
@@ -328,7 +363,7 @@ export function SessionList({
 			next.delete(activeId);
 			return next;
 		});
-	}, [currentWorkspaceId, pendingWorkspaceId]);
+	}, [currentWorkspaceId, draftActive, draft?.workspaceId]);
 
 	useEffect(() => {
 		saveCollapsed(collapsed);
@@ -495,8 +530,9 @@ export function SessionList({
 					{grouped.groups.map(({ workspace, sessions: groupSessions }) => {
 						const expanded = !collapsed.has(workspace.id);
 						const highlighted =
-							pendingWorkspaceId === workspace.id ||
-							(currentId !== null && workspace.sessionIds.includes(currentId));
+							currentId !== null && workspace.sessionIds.includes(currentId);
+						const draftHere =
+							draft !== null && draft.workspaceId === workspace.id;
 						return (
 							<div key={workspace.id}>
 								<fieldset
@@ -618,6 +654,9 @@ export function SessionList({
 								</fieldset>
 								{expanded && (
 									<ul className="mb-1 flex flex-col gap-0.5 pl-2">
+										{draftHere && (
+											<DraftRow active={draftActive} onSelect={onSelectDraft} />
+										)}
 										{groupSessions.map((s) => (
 											<SessionRow
 												key={s.id}
@@ -629,7 +668,7 @@ export function SessionList({
 												onArchive={onArchive}
 											/>
 										))}
-										{groupSessions.length === 0 && (
+										{groupSessions.length === 0 && !draftHere && (
 											<li className="px-3 py-1.5 text-xs text-muted-foreground">
 												暂无会话
 											</li>
@@ -639,12 +678,16 @@ export function SessionList({
 							</div>
 						);
 					})}
-					{grouped.ungrouped.length > 0 && (
+					{(grouped.ungrouped.length > 0 ||
+						(draft !== null && draft.workspaceId === null)) && (
 						<div className="mt-1">
 							<div className="px-3 pb-1 pt-2 text-xs font-medium text-muted-foreground">
 								未分组
 							</div>
 							<ul className="flex flex-col gap-0.5">
+								{draft !== null && draft.workspaceId === null && (
+									<DraftRow active={draftActive} onSelect={onSelectDraft} />
+								)}
 								{grouped.ungrouped.map((s) => (
 									<SessionRow
 										key={s.id}

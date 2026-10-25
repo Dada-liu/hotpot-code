@@ -195,7 +195,10 @@ export async function pickDirectory(): Promise<{ path: string | null }> {
 // 会话创建：workspaceId 与 cwd 互斥（工作区绑定由服务端完成，cwd 自动归属）
 export async function createSession(opts?: {
 	cwd?: string;
-	workspaceId?: string;
+	// null = 明确不归属工作区（草稿落未分组）；undefined = 服务端按 cwd 自动归属
+	workspaceId?: string | null;
+	// 草稿态里选的权限档位，随首条消息一并生效
+	permissionMode?: PermissionMode;
 }): Promise<string> {
 	const body = (await post("/api/sessions", opts ?? {})) as {
 		id: string;
@@ -333,6 +336,14 @@ export async function uploadFile(
 		name,
 		content,
 	})) as UploadResponse;
+}
+
+// 草稿态附件上传（尚未创建会话）：写全局 drafts 目录，返回绝对路径
+export async function uploadDraftFile(
+	name: string,
+	content: string,
+): Promise<UploadResponse> {
+	return (await post("/api/uploads", { name, content })) as UploadResponse;
 }
 
 // M3 @ 补全：列会话工作区目录直接子级（dirPart 为相对目录，"" = cwd 自身）

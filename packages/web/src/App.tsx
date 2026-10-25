@@ -22,6 +22,7 @@ import {
 	listPrompts,
 	listSessions,
 	listWorkspaces,
+	type PermissionMode,
 	PickerUnavailableError,
 	type PromptInfo,
 	pickDirectory,
@@ -41,7 +42,6 @@ import { SettingsDialog } from "./components/SettingsDialog.tsx";
 import { WorkspacePickerDialog } from "./components/WorkspacePickerDialog.tsx";
 import { type ConnectionState, connect } from "./events.ts";
 import { sessionNameFromPrompt } from "./lib/session-name.ts";
-import { workspaceForSession } from "./lib/workspaces.ts";
 import { createInitialState, reduceChatAction } from "./state/reducer.ts";
 
 // 会话 id → 首轮提示词提取的显示名，持久化到 localStorage（服务端 SessionSummary 无 name 字段）
@@ -71,17 +71,22 @@ function errorMessage(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
 }
 
+// 临时会话（草稿）：id 仅用于前端 key/选中；workspaceId=null 表示落「未分组」；
+// permissionMode 是草稿态里用户选的档位，随首条消息的会话创建一并提交
+interface DraftSession {
+	id: string;
+	workspaceId: string | null;
+	permissionMode: PermissionMode;
+}
+
 export function App() {
 	const [sessions, setSessions] = useState<SessionSummary[]>([]);
 	// 工作区注册表：数组顺序即侧栏展示顺序
 	const [workspaces, setWorkspaces] = useState<WorkspaceWire[]>([]);
 	const [currentId, setCurrentId] = useState<string | null>(null);
-	// 点“新建会话”后进入待创建态：不立刻建会话，首条消息发送时才创建
-	const [pending, setPending] = useState(false);
-	// 待创建会话绑定的工作区（null = 服务端默认 cwd，落未分组）
-	const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(
-		null,
-	);
+	// 临时会话（草稿）：点击顶部「新建会话」或工作区「+」生成，不持久化；
+	// 仅存在于前端状态与侧栏草稿行，首条消息发送时才创建真正的会话文件
+	const [draft, setDraft] = useState<DraftSession | null>(null);
 	// 降级弹窗：仅系统原生选择器不可用时打开（手动输入路径）
 	const [pickerOpen, setPickerOpen] = useState(false);
 	// 原生选择器请求在途：禁用「添加工作区」入口，防止重复弹系统对话框
@@ -191,38 +196,48 @@ export function App() {
 		}
 	}, [currentId, chat.turn, refreshInbox]);
 
-	// 进入待创建欢迎态：绑定目标工作区，首条消息发送时才真正建会话
-	const enterPending = (workspaceId: string | null): void => {
-		setPendingWorkspaceId(workspaceId);
+	// 生成临时会话（草稿）：绑定目标工作区（null = 未分组），侧栏立即出现「新会话」行；
+	// 不落盘，首条消息发送时才创建真正的会话
+	const enterDraft = (workspaceId: string | null): void => {
+		setDraft({
+			id: crypto.randomUUID(),
+			workspaceId,
+			permissionMode: "workspace",
+		});
 		setCurrentId(null);
-		setPending(true);
 		setNotices([]);
 		setCreateError(null);
 		dispatch({ type: "reset" });
 		setError(null);
 	};
 
-	// 全局「新建会话」：当前会话所属工作区 → 第一个工作区 → 没有工作区则先添加
+	// 顶部「新建会话」：始终在「未分组」下生成临时会话
 	const handleCreateGlobal = (): void => {
-		const currentWorkspace =
-			currentId === null ? null : workspaceForSession(workspaces, currentId);
-		const target = currentWorkspace ?? workspaces[0] ?? null;
-		if (target === null) {
-			void handleAddWorkspace();
+		enterDraft(null);
+	};
+
+	// 工作区行「+」：在对应工作区下生成临时会话
+	const handleNewSessionIn = (workspaceId: string): void => {
+		enterDraft(workspaceId);
+	};
+
+	// 选中草稿行：回到草稿欢迎态，并恢复草稿里选的权限档位
+	const handleSelectDraft = (): void => {
+		if (draft === null || (currentId === null && draft !== null)) {
 			return;
 		}
-		enterPending(target.id);
+		setError(null);
+		setCreateError(null);
+		setCurrentId(null);
+		dispatch({ type: "reset" });
+		dispatch({ type: "permission", mode: draft.permissionMode });
 	};
 
-	const handleNewSessionIn = (workspaceId: string): void => {
-		enterPending(workspaceId);
-	};
-
-	// 选择器创建成功：刷新注册表并让待建会话绑定到该工作区（可能是既有记录）
+	// 选择器创建成功：刷新注册表并让草稿绑定到该工作区（可能是既有记录）
 	const handleWorkspaceCreated = (workspace: WorkspaceWire): void => {
 		setPickerOpen(false);
 		void refreshWorkspaces();
-		enterPending(workspace.id);
+		enterDraft(workspace.id);
 	};
 
 	// 「添加工作区」直连系统原生选择器：选中即注册，不弹自定义中间弹窗。
@@ -260,10 +275,13 @@ export function App() {
 		await refreshWorkspaces();
 	};
 
-	// 删除只注销注册：当前会话不重置对话，刷新后自然落入「未分组」
+	// 删除只注销注册：当前会话不重置对话，刷新后自然落入「未分组」；
+	// 草稿若绑定该工作区则清掉（回到中性欢迎态）
 	const handleDeleteWorkspace = async (id: string): Promise<void> => {
 		await deleteWorkspace(id);
-		setPendingWorkspaceId((prev) => (prev === id ? null : prev));
+		setDraft((prev) =>
+			prev !== null && prev.workspaceId === id ? null : prev,
+		);
 		await Promise.all([refreshSessions(), refreshWorkspaces()]);
 	};
 
@@ -287,13 +305,12 @@ export function App() {
 		}
 	};
 
+	// 选中正式会话：草稿行保留在侧栏（点击可回到草稿态）
 	const handleSelect = (id: string): void => {
 		if (id === currentId) {
 			return;
 		}
 		setError(null);
-		setPending(false);
-		setPendingWorkspaceId(null);
 		setCurrentId(id);
 		dispatch({ type: "reset" });
 	};
@@ -326,8 +343,6 @@ export function App() {
 			});
 			if (id === currentId) {
 				setCurrentId(null);
-				setPending(false);
-				setPendingWorkspaceId(null);
 				dispatch({ type: "reset" });
 			}
 			await refreshSessions();
@@ -344,16 +359,16 @@ export function App() {
 	// 只追加本地 notice 气泡，不进入回合
 	const handleSend = async (content: string): Promise<void> => {
 		try {
-			// 待创建态：首条消息先到——绑定待选工作区（无则服务端默认 cwd）创建会话、
-			// 以提示词命名、加入列表并连接
+			// 草稿态（含未点新建、直接输入发送）：首条消息才创建会话文件。
+			// workspaceId=null 明确落「未分组」（跳过服务端按 cwd 自动归属）；
+			// 草稿里选的权限档位随创建一并生效；草稿行由正式会话行替换
 			if (currentId === null) {
 				let id: string;
 				try {
-					id = await createSession(
-						pendingWorkspaceId === null
-							? undefined
-							: { workspaceId: pendingWorkspaceId },
-					);
+					id = await createSession({
+						workspaceId: draft?.workspaceId ?? null,
+						permissionMode: draft?.permissionMode ?? chat.permissionMode,
+					});
 				} catch (e) {
 					// 工作区已删除（404）、cwd 校验失败（400）等：停在欢迎态，红字提示
 					setCreateError(errorMessage(e));
@@ -365,8 +380,7 @@ export function App() {
 					return next;
 				});
 				setCurrentId(id);
-				setPending(false);
-				setPendingWorkspaceId(null);
+				setDraft(null);
 				setCreateError(null);
 				// 归属关系随创建变化，两个列表一起刷新
 				await Promise.all([refreshSessions(), refreshWorkspaces()]);
@@ -402,15 +416,21 @@ export function App() {
 		}
 	};
 
-	// 权限档位切换：乐观写入 + 服务端权威校正（wire permission 事件覆写）；失败回填
+	// 权限档位切换：草稿态只更新本地（随首条消息提交）；正式会话乐观写入 +
+	// 服务端权威校正（wire permission 事件覆写），失败回填
 	const handlePermissionChange = async (
-		mode: "readonly" | "workspace" | "full",
+		mode: PermissionMode,
 	): Promise<void> => {
-		if (currentId === null || permissionBusy) {
+		if (permissionBusy) {
 			return;
 		}
 		const previous = chat.permissionMode;
 		if (previous === mode) {
+			return;
+		}
+		if (currentId === null) {
+			dispatch({ type: "permission", mode });
+			setDraft((d) => (d === null ? d : { ...d, permissionMode: mode }));
 			return;
 		}
 		dispatch({ type: "permission", mode });
@@ -515,11 +535,12 @@ export function App() {
 
 	const current = sessions.find((s) => s.id === currentId) ?? null;
 	const currentName = current ? (names[current.id] ?? current.cwd) : "";
-	// 待建会话绑定工作区：顶栏显示标题作为提示，title 展示完整路径
-	const pendingWorkspace =
-		pendingWorkspaceId === null
+	// 草稿绑定的工作区：顶栏显示标题作为提示，title 展示完整路径；
+	// 草稿态（currentId===null 且存在 draft）标题固定为「新会话」
+	const draftWorkspace =
+		draft === null || draft.workspaceId === null
 			? null
-			: (workspaces.find((w) => w.id === pendingWorkspaceId) ?? null);
+			: (workspaces.find((w) => w.id === draft.workspaceId) ?? null);
 	// 右侧面板开关只在 work agent 运行期间展示
 	const workerRunning = chat.agents.some(
 		(a) => a.role === "worker" && a.status === "running",
@@ -532,7 +553,13 @@ export function App() {
 					workspaces={workspaces}
 					sessions={sessions}
 					currentId={currentId}
-					pendingWorkspaceId={pendingWorkspaceId}
+					draft={
+						draft === null
+							? null
+							: { id: draft.id, workspaceId: draft.workspaceId }
+					}
+					draftActive={currentId === null && draft !== null}
+					onSelectDraft={handleSelectDraft}
 					nameFor={(s) => names[s.id] ?? s.cwd}
 					onSelect={handleSelect}
 					onNewSessionIn={handleNewSessionIn}
@@ -565,14 +592,14 @@ export function App() {
 					<header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
 						<span
 							className="min-w-0 flex-1 truncate text-sm text-muted-foreground"
-							title={current?.cwd ?? pendingWorkspace?.path ?? undefined}
+							title={current?.cwd ?? draftWorkspace?.path ?? undefined}
 						>
 							{current
 								? currentName
-								: pending
-									? pendingWorkspace === null
+								: draft !== null
+									? draftWorkspace === null
 										? "新会话"
-										: `新会话 · ${pendingWorkspace.title}`
+										: `新会话 · ${draftWorkspace.title}`
 									: "hotpot-agent"}
 						</span>
 						<span
