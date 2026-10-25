@@ -10,7 +10,7 @@ import {
 	File,
 	Folder,
 	ListPlus,
-	Plus,
+	Paperclip,
 	Send,
 	Square,
 	X,
@@ -186,11 +186,13 @@ interface MentionState {
 	loading: boolean;
 }
 
-// 输入卡片：welcome 态与对话底部共用。M4 重做：
+// 输入卡片：welcome 态与对话底部共用。上下布局（textarea 在上，按钮区在下）：
 // - 空闲发送 = 新 turn；运行中发送 = 排队 next-turn（ListPlus 图标），取消钮移到 QueueBar
+// - 底部左侧：权限切换（Shield）+ 添加附件（Paperclip）；右侧：发送/排队。图标按钮
+//   tooltip 统一 side="top" + sideOffset={0}
 // - `/` 补全按 builtin 分组（内置指令 / 提示词模板）；内置指令命中后服务端 200 {reply}
 //   由 App 渲染本地 notice 气泡
-// - ➕ 选文本附件立即上传，chip 可移除；发送时每个附件的 @<绝对路径> 独占一行追加
+// - 选文本附件立即上传，chip 可移除；发送时每个附件的 @<绝对路径> 独占一行追加
 // - @ 触发工作区文件补全（防抖 200ms 调 fs/ls，Enter/点击插入 @<绝对路径>）
 // tall：未选中会话的 welcome 态，输入框最小高度在默认基础上增加一半（76px → 114px）
 function Composer({
@@ -440,7 +442,7 @@ function Composer({
 		}
 	};
 
-	// ➕ 附件按钮：无会话禁用并提示先创建
+	// 附件按钮：统一用回形针图标（与「新建」类加号区分）；无会话禁用并提示先创建
 	const attachButton = (
 		<Button
 			type="button"
@@ -453,7 +455,7 @@ function Composer({
 			}}
 			aria-label="添加附件"
 		>
-			<Plus className="size-4" />
+			<Paperclip className="size-4" />
 		</Button>
 	);
 
@@ -580,32 +582,7 @@ function Composer({
 			{attachError !== null && (
 				<div className="mb-2 text-xs text-destructive">{attachError}</div>
 			)}
-			<div className="flex items-end gap-1 rounded-2xl border border-border-strong bg-background p-3 shadow-lg shadow-black/5">
-				<PermissionSelect
-					mode={permissionMode}
-					disabled={permissionDisabled}
-					onChange={onPermissionChange}
-				/>
-				<input
-					ref={fileInputRef}
-					type="file"
-					multiple
-					className="hidden"
-					onChange={(e) => {
-						void onPickFiles(e);
-					}}
-				/>
-				{hasSession ? (
-					attachButton
-				) : (
-					<Tooltip>
-						<TooltipTrigger asChild>
-							{/* 禁用按钮不触发 hover：包一层 span 承载 tooltip */}
-							<span className="inline-flex">{attachButton}</span>
-						</TooltipTrigger>
-						<TooltipContent side="top">先创建会话</TooltipContent>
-					</Tooltip>
-				)}
+			<div className="flex flex-col gap-2 rounded-2xl border border-border-strong bg-background p-3 shadow-lg shadow-black/5">
 				<Textarea
 					ref={textareaRef}
 					value={draft}
@@ -625,23 +602,61 @@ function Composer({
 					}
 					rows={1}
 					className={cn(
-						"flex-1 resize-none border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0",
+						"w-full resize-none border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0",
 						tall ? "min-h-[114px]" : "min-h-[76px]",
 					)}
 				/>
-				<Button
-					type="submit"
-					size="icon"
-					className="rounded-full"
-					disabled={draft.trim() === "" && attachments.length === 0}
-					aria-label={running ? "排队" : "发送"}
-				>
-					{running ? (
-						<ListPlus className="size-4" />
-					) : (
-						<Send className="size-4" />
-					)}
-				</Button>
+				{/* 底部按钮区：左侧权限 + 附件（附件在权限之后），右侧发送/排队 */}
+				<div className="flex items-center justify-between">
+					<div className="flex items-center gap-1">
+						<PermissionSelect
+							mode={permissionMode}
+							disabled={permissionDisabled}
+							onChange={onPermissionChange}
+						/>
+						<input
+							ref={fileInputRef}
+							type="file"
+							multiple
+							className="hidden"
+							onChange={(e) => {
+								void onPickFiles(e);
+							}}
+						/>
+						{hasSession ? (
+							<Tooltip>
+								<TooltipTrigger asChild>{attachButton}</TooltipTrigger>
+								{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+								<TooltipContent side="top" sideOffset={0}>
+									添加附件
+								</TooltipContent>
+							</Tooltip>
+						) : (
+							<Tooltip>
+								<TooltipTrigger asChild>
+									{/* 禁用按钮不触发 hover：包一层 span 承载 tooltip */}
+									<span className="inline-flex">{attachButton}</span>
+								</TooltipTrigger>
+								<TooltipContent side="top" sideOffset={0}>
+									先创建会话
+								</TooltipContent>
+							</Tooltip>
+						)}
+					</div>
+					<Button
+						type="submit"
+						size="icon"
+						className="rounded-full"
+						disabled={draft.trim() === "" && attachments.length === 0}
+						aria-label={running ? "排队" : "发送"}
+					>
+						{running ? (
+							<ListPlus className="size-4" />
+						) : (
+							<Send className="size-4" />
+						)}
+					</Button>
+				</div>
 			</div>
 		</form>
 	);
