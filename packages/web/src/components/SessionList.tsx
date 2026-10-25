@@ -476,8 +476,9 @@ export function SessionList({
 					</div>
 					{workspaces.length === 0 && (
 						<div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
-							<p className="text-xs text-muted-foreground">
-								还没有工作区，请选择文件夹作为工作区
+							<p className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+								<span>还没有工作区</span>
+								<span>请选择文件夹作为工作区</span>
 							</p>
 							<Button
 								variant="outline"
