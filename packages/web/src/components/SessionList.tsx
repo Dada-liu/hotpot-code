@@ -216,8 +216,8 @@ function SessionRow({
 							<ChevronDown className="size-3.5 transition-transform duration-200 [[data-state=open]_&]:rotate-180" />
 						</button>
 					</DropdownMenuTrigger>
-					{/* 会话行操作弹窗开在侧栏右侧（侧栏之外），不遮挡侧栏内容 */}
-					<DropdownMenuContent side="right" align="start" sideOffset={16}>
+					{/* 会话行操作弹窗与工作区弹窗一致：侧栏右侧、sideOffset 4 */}
+					<DropdownMenuContent side="right" align="start" sideOffset={4}>
 						{running ? (
 							<DropdownMenuItem
 								className="gap-2"
@@ -467,16 +467,18 @@ export function SessionList({
 										<FolderPlus className="size-3.5" />
 									</button>
 								</TooltipTrigger>
-								{/* 图标按钮规则：气泡在 svg 上方 4px（见 web AGENTS.md） */}
-								<TooltipContent side="top" sideOffset={4}>
-									请选择文件夹作为工作区
+								{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+								<TooltipContent side="top" sideOffset={0}>
+									添加工作区
 								</TooltipContent>
 							</Tooltip>
 						)}
 					</div>
 					{workspaces.length === 0 && (
 						<div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
-							<p className="text-xs text-muted-foreground">还没有工作区</p>
+							<p className="text-xs text-muted-foreground">
+								还没有工作区，请选择文件夹作为工作区
+							</p>
 							<Button
 								variant="outline"
 								size="sm"
@@ -571,8 +573,8 @@ export function SessionList({
 												<Plus className="size-3.5" />
 											</button>
 										</TooltipTrigger>
-										{/* 图标按钮规则：气泡在 svg 上方 4px（见 web AGENTS.md） */}
-										<TooltipContent side="top" sideOffset={4}>
+										{/* 图标按钮规则：气泡紧贴 svg 上方（sideOffset=0，见 web AGENTS.md） */}
+										<TooltipContent side="top" sideOffset={0}>
 											新建会话
 										</TooltipContent>
 									</Tooltip>
