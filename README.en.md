@@ -10,13 +10,19 @@
 
 A code agent built on Node + TypeScript. Goal: lower cost, better results.
 
-## Install
+## Install and Use
 
 ```bash
+# Install
 npm install -g hotpot-agent
 ```
 
 The npm package is named `hotpot-agent` (the `hotpot` name is taken by an unrelated project); the installed command is `hotpot`. Node >= 22 is required.
+
+```bash
+# Usage
+hotpot web
+```
 
 ## Architecture
 

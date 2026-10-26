@@ -10,13 +10,20 @@
 
 基于 Node + TypeScript 的 code agent。目标：更低的成本、更好的效果。
 
-## 安装
+## 安装和使用
 
 ```bash
+# 安装
 npm install -g hotpot-agent
 ```
 
 npm 包名是 `hotpot-agent`，安装后的命令是 `hotpot`。要求 Node >= 22。
+
+```bash
+# 使用
+hotpot web
+```
+
 
 ## 架构
 
