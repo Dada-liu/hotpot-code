@@ -298,7 +298,7 @@ describe("runChat", () => {
 			output,
 		});
 
-		// echo 不是危险命令，workspace 下不会询问；readonly 下逐个预审批并放行
+		// echo 不是危险命令，ask-on-dangerous 下不会询问；readonly 下逐个预审批并放行
 		expect(output.text).toContain("[approval]");
 		expect(output.text).toContain("已允许");
 		expect(output.text).toContain("执行完毕");

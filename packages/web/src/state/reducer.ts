@@ -112,7 +112,7 @@ export interface ChatState {
 	usage: UsageTotals;
 	// steer/queue 两队列（inbox/spliced 折叠；REST 快照可覆盖修正消费后的残留）
 	inbox: InboxSnapshot;
-	// M3 权限模式：wire permission 事件与 GET /permission 种子值折叠到此（默认 workspace）
+	// M3 权限模式：wire permission 事件与 GET /permission 种子值折叠到此（默认 ask-on-dangerous）
 	permissionMode: PermissionMode;
 	// agent 任务清单：todo/set 全量快照按 agentId 折叠（last-write-wins），
 	// 右侧面板卡片在状态栏下方实时渲染
@@ -138,7 +138,7 @@ export function createInitialState(): ChatState {
 		turn: "idle",
 		usage: { total: { input: 0, output: 0 }, byTier: {} },
 		inbox: { nextTurn: [], nextStep: [] },
-		permissionMode: "workspace",
+		permissionMode: "ask-on-dangerous",
 		todosByAgent: {},
 		hiddenPlanMessageIds: [],
 		seenEventIds: [],

@@ -20,7 +20,7 @@ hotpot --version
 hotpot --help
 ```
 
-`hotpot web` 默认监听 `127.0.0.1:4573`，启动后自动打开浏览器；`--no-open` 用于脚本或远程环境。端口也可用 `HOTPOT_PORT` 指定。
+`hotpot web` 默认监听 `127.0.0.1:4573`，每次启动生成 API token，并自动打开带 `?token=` 的地址；浏览器将 token 存入会话存储后清理地址栏，刷新仍可访问。`--no-open` 用于脚本或远程环境，此时使用终端打印的完整地址。端口可用 `HOTPOT_PORT` 指定，非空 `HOTPOT_API_TOKEN` 可固定启动 token。
 
 ## 构建与发布
 

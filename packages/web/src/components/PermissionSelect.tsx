@@ -29,7 +29,7 @@ const MODES: { mode: PermissionMode; label: string; hint: string }[] = [
 		hint: "读自动放行，其余操作需逐个审批",
 	},
 	{
-		mode: "workspace",
+		mode: "ask-on-dangerous",
 		label: "危险操作询问",
 		hint: "遇到危险操作时询问",
 	},

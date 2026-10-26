@@ -40,7 +40,7 @@ function validSettings(): unknown {
 		mainAgentTier: "medium",
 		maxParallelTasks: 4,
 		planMaxRevisions: 2,
-		permission: { mode: "workspace" },
+		permission: { mode: "ask-on-dangerous" },
 	};
 }
 
@@ -169,9 +169,22 @@ describe("loadSettings", () => {
 		expect(settings.mainAgentTier).toBe("high");
 		expect(settings.maxParallelTasks).toBe(8);
 		expect(settings.planMaxRevisions).toBe(5);
-		expect(settings.permission?.mode).toBe("readonly");
+		expect(settings.permission?.mode).toBe("ask-on-dangerous");
 		// 凭证与未覆盖字段仍来自用户级
 		expect(settings.models.high.model).toBe("claude-sonnet-4-5");
+	});
+
+	it("项目级 permission.mode=full 不得提升用户权限", async () => {
+		const data = validSettings() as { permission: { mode: string } };
+		data.permission.mode = "readonly";
+		await writeSettings(data);
+		await writeProjectSettings(home, {
+			permission: { mode: "full" },
+			maxParallelTasks: 8,
+		});
+		const settings = loadSettings({ home, cwd: home });
+		expect(settings.permission?.mode).toBe("readonly");
+		expect(settings.maxParallelTasks).toBe(8);
 	});
 
 	it("项目级 models 被忽略，凭证只来自用户级", async () => {
@@ -203,6 +216,15 @@ describe("loadSettings", () => {
 			permission: { mode: string };
 		};
 		data.permission.mode = "everything";
+		await writeSettings(data);
+		expect(() => loadSettings({ home, cwd: home })).toThrow(/permission/);
+	});
+
+	it("旧 workspace 权限值报错，不映射到 ask-on-dangerous", async () => {
+		const data = validSettings() as {
+			permission: { mode: string };
+		};
+		data.permission.mode = "workspace";
 		await writeSettings(data);
 		expect(() => loadSettings({ home, cwd: home })).toThrow(/permission/);
 	});

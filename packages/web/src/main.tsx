@@ -1,7 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
+import { initializeAuth } from "./auth.ts";
 import "./styles.css";
+
+initializeAuth();
 
 const container = document.getElementById("root");
 if (!container) {

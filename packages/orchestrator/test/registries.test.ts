@@ -50,7 +50,7 @@ function stubRuntime(
 		approval: new ApprovalChain(),
 		maxParallelTasks: 10,
 		planMaxRevisions: 3,
-		permissionMode: { mode: "workspace" },
+		permissionMode: { mode: "ask-on-dangerous" },
 		resolveModel: () => {
 			throw new Error("stubRuntime: resolveModel not implemented");
 		},

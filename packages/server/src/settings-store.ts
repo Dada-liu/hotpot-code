@@ -1,7 +1,7 @@
 // 用户级 settings.json 的「模型设置」读写（web 设置弹窗用）。
-// 与 loadSettings 的差异：不做 $ENV 插值——编辑器要看到 "$OPENAI_API_KEY" 引用原文；
+// 与 loadSettings 的差异：不做 $ENV 插值，所有 apiKey 只返回固定掩码；
 // 只暴露/写回 models 与 mainAgentTier 两个键，其余字段原样保留（parse → 改键 → 写回）。
-// apiKey 经 localhost 原样返回：服务绑定 127.0.0.1，本机任意进程本就可读该文件。
+// PUT 中仍为掩码的档位保留磁盘原值，其他非空值表示明确替换。
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +40,8 @@ function readRawSettings(path: string): Record<string, unknown> {
 	return data as Record<string, unknown>;
 }
 
+export const API_KEY_MASK = "********";
+
 // 读模型设置切片；文件缺失/非法 JSON/切片不合规统一抛带路径的错误（路由转 500）
 export function readModelSettings(home?: string): ModelSettingsView {
 	const path = settingsPath(home);
@@ -50,16 +52,25 @@ export function readModelSettings(home?: string): ModelSettingsView {
 			.join("; ");
 		throw new Error(`invalid model settings in ${path}: ${detail}`);
 	}
+	for (const tier of ["high", "medium", "low"] as const) {
+		parsed.data.models[tier].apiKey = API_KEY_MASK;
+	}
 	return parsed.data;
 }
 
-// 写回：只覆盖 models/mainAgentTier，其余键保持原值；2 空格缩进 + 末尾换行
+// 写回：只覆盖 models/mainAgentTier，其余键保持原值；掩码档位保留磁盘原 apiKey
 export function writeModelSettings(
 	settings: ModelSettingsView,
 	home?: string,
 ): void {
 	const path = settingsPath(home);
 	const raw = readRawSettings(path);
+	const current = modelSettingsViewSchema.parse(raw);
+	for (const tier of ["high", "medium", "low"] as const) {
+		if (settings.models[tier].apiKey === API_KEY_MASK) {
+			settings.models[tier].apiKey = current.models[tier].apiKey;
+		}
+	}
 	raw.models = settings.models;
 	if (settings.mainAgentTier !== undefined) {
 		raw.mainAgentTier = settings.mainAgentTier;

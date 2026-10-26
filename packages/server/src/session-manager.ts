@@ -5,7 +5,7 @@
 //   其余委托桥 handler bridge.registerToolAsk，运行期切换立即生效）；
 //   整体经 createAuditedApprovalChain 落盘审计
 // - decorateWorkerTool 总是设置 createPermissionModeDecorator(holder)，包装在 execute
-//   时按 holder.mode 动态分派（readonly 预审批非 read 工具；workspace/full 原样放行）；
+//   时按 holder.mode 动态分派（readonly 预审批非 read 工具；ask-on-dangerous/full 原样放行）；
 //   holder 同时作为 runtime.permissionMode 传入，运行期可被 API 改写（M2）
 // - createRuntime + opts.llm 覆盖 resolveModel（scriptedAdapter 测试注入，同 chat.ts）
 // - createInbox(session, "main", {onCancel, seed})；onPlanApproval 走桥的 registerPlanAsk
@@ -172,7 +172,7 @@ export interface FsEntry {
 // 权限模式合法值（与 core config 的 PERMISSION_MODES 同序；该常量未导出，此处镜像）
 const PERMISSION_MODE_VALUES: readonly string[] = [
 	"readonly",
-	"workspace",
+	"ask-on-dangerous",
 	"full",
 ];
 
@@ -211,7 +211,7 @@ function parseSlashInput(
 const HELP_REPLY = `可用命令：
 /help — 显示本帮助
 /permission — 查看当前权限模式
-/permission <readonly|workspace|full> — 切换权限模式
+/permission <readonly|ask-on-dangerous|full> — 切换权限模式
 提示：输入 / 还可以补全 prompt 模板。`;
 
 // M2 内置指令注册表：send() 里先于 prompt template 解析分发；未命中的斜杠输入
@@ -458,7 +458,7 @@ const BUILTIN_COMMANDS: BuiltinCommand[] = [
 	},
 	{
 		name: "permission",
-		description: "查看或切换权限模式（readonly|workspace|full）",
+		description: "查看或切换权限模式（readonly|ask-on-dangerous|full）",
 		run: async (m, args) => {
 			if (args === "") {
 				return `当前权限模式：${m.runtime.permissionMode.mode}`;
@@ -677,11 +677,11 @@ export function createSessionManager(
 
 		// 审批装配镜像 chat.ts：链头挂 createPermissionModeChainHead 动态处理器——
 		// 执行时读 holder：full 任何询问直接放行（运行期切换立即生效，永不打断），
-		// readonly/workspace 委托桥 handler（parked promise 等 web 应答）。
-		// 默认 workspace；holder 与 runtime.permissionMode 共享引用，运行期可被改写（M2）；
+		// readonly/ask-on-dangerous 委托桥 handler（parked promise 等 web 应答）。
+		// 默认 ask-on-dangerous；holder 与 runtime.permissionMode 共享引用，运行期可被改写（M2）；
 		// attach 恢复时 permissionSeed（fold permission/changed）优先于 settings
 		const mode: PermissionMode =
-			init.permissionSeed ?? settings.permission?.mode ?? "workspace";
+			init.permissionSeed ?? settings.permission?.mode ?? "ask-on-dangerous";
 		const permissionHolder: { mode: PermissionMode } = { mode };
 		const baseApproval = new ApprovalChain();
 		baseApproval.use(
@@ -695,7 +695,7 @@ export function createSessionManager(
 		});
 
 		// decorateWorkerTool 总是设置：包装在 execute 时读 holder.mode 动态分派——
-		// readonly 给非 read 工具逐个预审批；workspace/full 原样放行（workspace 靠工具
+		// readonly 给非 read 工具逐个预审批；ask-on-dangerous/full 原样放行（ask-on-dangerous 靠工具
 		// 内建危险判定询问，full 靠上面链头的 allowAllHandler 兜底）
 		const decorateWorkerTool: WorkerToolDecorator =
 			createPermissionModeDecorator(permissionHolder);

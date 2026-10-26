@@ -47,7 +47,7 @@ function summarizeToolInput(input: unknown): string {
 
 // 权限模式动态分派的 worker 工具装饰器（M1，替代旧 policy=always 的静态包装）：
 // 装配期总是设置，execute 时才读 holder.mode —— readonly 下非 read 工具逐个预审批
-// （旧 always 语义）；workspace/full 原样放行（workspace 靠工具内建危险判定询问，
+// （旧 always 语义）；ask-on-dangerous/full 原样放行（ask-on-dangerous 靠工具内建危险判定询问，
 // full 靠 createPermissionModeChainHead 动态链头兜底，永不打断）。
 // read 永不包：无副作用，任何模式下都不询问。holder 与 runtime.permissionMode
 // 共享同一对象引用，运行期改写 holder.mode 立即对尚未执行的工具生效
@@ -82,7 +82,7 @@ export function createPermissionModeDecorator(holder: {
 }
 
 // 权限模式动态分派的审批链头处理器（M2 修订）：与装饰器一样在 ask 时才读
-// holder.mode —— full 直接放行（运行期从 workspace/readonly 切到 full 立即生效，
+// holder.mode —— full 直接放行（运行期从 ask-on-dangerous/readonly 切到 full 立即生效，
 // 永不打断）；其余模式原样委托调用方传入的询问 handler（server 桥 / cli 终端）。
 // 替代旧装配期静态挂 allowAllHandler 的做法（装配后切换 full 不生效的缺口）
 export function createPermissionModeChainHead(
@@ -99,7 +99,7 @@ export interface OrchestrationRuntime {
 	readonly maxParallelTasks: number;
 	readonly planMaxRevisions: number;
 	readonly decorateWorkerTool?: WorkerToolDecorator;
-	// M1 权限模式可变持有者：装配时从 settings 初始化（默认 workspace），
+	// M1 权限模式可变持有者：装配时从 settings 初始化（默认 ask-on-dangerous），
 	// 运行期可被 server API 改写（M2 端点）；与装饰器工厂共享引用，
 	// 改写立即对后续工具执行生效
 	permissionMode: { mode: PermissionMode };
@@ -134,7 +134,7 @@ export function createRuntime(opts: {
 	maxParallelTasks?: number;
 	planMaxRevisions?: number;
 	decorateWorkerTool?: WorkerToolDecorator;
-	// M1 权限模式持有者：缺省 { mode: "workspace" }；装配层传入时须与
+	// M1 权限模式持有者：缺省 { mode: "ask-on-dangerous" }；装配层传入时须与
 	// createPermissionModeDecorator 共享同一对象，保证运行期改写对装饰器可见
 	permissionMode?: { mode: PermissionMode };
 	features?: Settings["features"];
@@ -192,7 +192,7 @@ export function createRuntime(opts: {
 		maxParallelTasks: opts.maxParallelTasks ?? 10,
 		planMaxRevisions: opts.planMaxRevisions ?? 3,
 		decorateWorkerTool: opts.decorateWorkerTool,
-		permissionMode: opts.permissionMode ?? { mode: "workspace" },
+		permissionMode: opts.permissionMode ?? { mode: "ask-on-dangerous" },
 		features: opts.features,
 		skills: opts.skills,
 		mcpTools: opts.mcpTools,

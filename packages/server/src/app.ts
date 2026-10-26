@@ -1,4 +1,5 @@
 // HTTP 外壳（M3）：Hono REST + SSE。
+// - 配置 apiToken 后 /api/* 必须认证：REST 用 Bearer，events GET 可用 access_token 查询参数
 // - 会话路由挂 /api/sessions*，设置路由挂 /api/settings（用户级模型设置读写）；
 //   错误统一 {error: string} 形态 + 合适状态码
 // - SSE（GET /:id/events）：帧格式 `id: <seq>` + `data: <WireEvent JSON>`，每 15s 一条
@@ -32,7 +33,7 @@ import type { WireEvent } from "./wire.ts";
 const createSessionSchema = z.object({
 	cwd: z.string().optional(),
 	workspaceId: z.string().nullable().optional(),
-	permissionMode: z.enum(["readonly", "workspace", "full"]).optional(),
+	permissionMode: z.enum(["readonly", "ask-on-dangerous", "full"]).optional(),
 });
 const createWorkspaceSchema = z.object({
 	path: z.string(),
@@ -55,7 +56,7 @@ const planSchema = z.object({
 });
 // M2 权限切换：mode 三档枚举，非法值由 zod 拦 400
 const putPermissionSchema = z.object({
-	mode: z.enum(["readonly", "workspace", "full"]),
+	mode: z.enum(["readonly", "ask-on-dangerous", "full"]),
 });
 // M2 文本附件上传：name 由 manager 净化（剥路径分隔符与 ..），content 纯文本
 const uploadSchema = z.object({
@@ -148,6 +149,8 @@ async function handleEvents(
 export interface AppOptions {
 	// settings.json 所在 home（测试注入临时目录；缺省 resolveHome → ~/.hotpot）
 	home?: string;
+	// 真实服务必须传入；缺省仅用于不开放网络端口的单元测试夹具
+	apiToken?: string;
 }
 
 export function createApp(
@@ -161,6 +164,23 @@ export function createApp(
 			{ error: err instanceof Error ? err.message : String(err) },
 			500,
 		);
+	});
+
+	// EventSource 无法自定义请求头，仅 events GET 允许用查询参数；其余 API 只接受 Bearer
+	app.use("/api/*", async (c, next) => {
+		if (opts.apiToken === undefined) return next();
+		const authorization = c.req.header("Authorization");
+		const bearer = authorization?.startsWith("Bearer ")
+			? authorization.slice("Bearer ".length)
+			: undefined;
+		const isEvents =
+			c.req.method === "GET" &&
+			/^\/api\/sessions\/[^/]+\/events$/.test(c.req.path);
+		const authenticated =
+			bearer === opts.apiToken ||
+			(isEvents && c.req.query("access_token") === opts.apiToken);
+		if (!authenticated) return c.json({ error: "未授权" }, 401);
+		return next();
 	});
 
 	// 受管会话存在性：内存 managed 表未命中时降级 attachById 恢复磁盘上的会话
@@ -191,7 +211,7 @@ export function createApp(
 			return c.json(
 				{
 					error:
-						"body 需为 {cwd?: string, workspaceId?: string | null, permissionMode?: readonly|workspace|full}",
+						"body 需为 {cwd?: string, workspaceId?: string | null, permissionMode?: readonly|ask-on-dangerous|full}",
 				},
 				400,
 			);
@@ -418,7 +438,7 @@ export function createApp(
 		const parsed = putPermissionSchema.safeParse(body);
 		if (!parsed.success) {
 			return c.json(
-				{ error: 'body 需为 {mode: "readonly"|"workspace"|"full"}' },
+				{ error: 'body 需为 {mode: "readonly"|"ask-on-dangerous"|"full"}' },
 				400,
 			);
 		}

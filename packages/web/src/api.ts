@@ -1,6 +1,7 @@
 // REST client：与 server/src/app.ts 的路由契约一一对应。
 // 错误统一抛出带服务端 message 的 Error，由调用方（App）兜底展示。
 
+import { authenticatedFetch } from "./auth.ts";
 import type {
 	FsEntry,
 	InboxSnapshot,
@@ -71,7 +72,7 @@ async function ensureOk(res: Response): Promise<void> {
 }
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-	const res = await fetch(path, init);
+	const res = await authenticatedFetch(path, init);
 	await ensureOk(res);
 	return res.json();
 }
@@ -95,7 +96,7 @@ function put(path: string, body: unknown): Promise<unknown> {
 
 // DELETE 常无响应体（204）：只走状态检查，失败抛出带服务端 message 的 Error
 async function del(path: string): Promise<void> {
-	const res = await fetch(path, { method: "DELETE" });
+	const res = await authenticatedFetch(path, { method: "DELETE" });
 	await ensureOk(res);
 }
 
@@ -170,7 +171,9 @@ function pickerError(body: unknown): { message: string; unavailable: boolean } {
 // POST /api/directory-picker/pick：取消返回 {path:null}；不可用抛 PickerUnavailableError。
 // macOS 上服务端会弹出系统模态框并阻塞到选择/取消，请求长时间在途属正常
 export async function pickDirectory(): Promise<{ path: string | null }> {
-	const res = await fetch("/api/directory-picker/pick", { method: "POST" });
+	const res = await authenticatedFetch("/api/directory-picker/pick", {
+		method: "POST",
+	});
 	let body: unknown = null;
 	try {
 		body = await res.json();
@@ -208,9 +211,12 @@ export async function createSession(opts?: {
 
 // DELETE 无响应体（204）：只走状态检查，失败抛出带服务端 message 的 Error
 export async function deleteSession(sessionId: string): Promise<void> {
-	const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-		method: "DELETE",
-	});
+	const res = await authenticatedFetch(
+		`/api/sessions/${encodeURIComponent(sessionId)}`,
+		{
+			method: "DELETE",
+		},
+	);
 	await ensureOk(res);
 }
 

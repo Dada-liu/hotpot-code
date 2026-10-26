@@ -59,6 +59,17 @@ function defaultDirs(): { webDist: string; publicDir: string } {
 	};
 }
 
+export function formatWebUrl(
+	hostname: string,
+	port: number,
+	apiToken: string,
+): string {
+	const connectable =
+		hostname === "0.0.0.0" || hostname === "::" ? "localhost" : hostname;
+	const host = connectable.includes(":") ? `[${connectable}]` : connectable;
+	return `http://${host}:${port}?token=${encodeURIComponent(apiToken)}`;
+}
+
 export async function runWebCli(argv: string[]): Promise<number> {
 	let args: WebCliArgs;
 	try {
@@ -83,8 +94,7 @@ export async function runWebCli(argv: string[]): Promise<number> {
 		webDist,
 		publicDir,
 		onListening: (info) => {
-			const host = args.hostname === "0.0.0.0" ? "localhost" : args.hostname;
-			const url = `http://${host}:${info.port}`;
+			const url = formatWebUrl(info.hostname, info.port, info.apiToken);
 			process.stdout.write(`hotpot web listening on ${url}\n`);
 			if (args.open) {
 				openBrowser(url);

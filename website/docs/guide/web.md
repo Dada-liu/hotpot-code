@@ -8,11 +8,12 @@
 hotpot web
 ```
 
-- 默认监听 http://127.0.0.1:4573，就绪后自动打开浏览器。
+- 默认监听 http://127.0.0.1:4573，每次启动生成 API token，就绪后自动打开带 `?token=` 的地址；手动访问时使用终端打印的完整地址。
+- 浏览器将 token 存入会话存储并清理地址栏，刷新后 REST/SSE 仍携带认证。
 - 端口可用参数或环境变量 `HOTPOT_PORT` 覆盖。
 - 与 CLI 使用同一份 settings 配置与同一份 `~/.hotpot/sessions/` 会话存储——CLI 里创建的会话，Web 端同样能打开，两边可以同时观察同一会话。
 
-源码仓库开发态运行 `pnpm dev web`；只改前端时另开 `pnpm --filter @hotpot/web dev`（Vite 将 `/api` 代理到 4573）。
+源码仓库开发态运行 `pnpm dev web`；只改前端时另开 `pnpm --filter @hotpot/web dev`（Vite 将 `/api` 代理到 4573）。Vite 与后端是不同 origin，需把后端终端打印的同一 token 拼到 Vite 地址（如 `http://localhost:5173/?token=...`），不能直接打开无 token 的 Vite 页面。
 
 ## 界面
 

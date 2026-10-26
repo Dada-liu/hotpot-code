@@ -166,6 +166,9 @@ declare module "node:url" {
 
 declare module "node:crypto" {
 	export function randomUUID(): string;
+	export function randomBytes(size: number): {
+		toString(encoding: "base64url"): string;
+	};
 }
 
 // ---- node:http 家族：@hono/node-server 的类型面 + serve 返回句柄的关断/寻址 ----

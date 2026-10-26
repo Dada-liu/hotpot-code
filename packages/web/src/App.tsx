@@ -170,7 +170,7 @@ export function App() {
 				dispatch({ type: "permission", mode });
 			})
 			.catch(() => {
-				// 拉取失败保持默认 workspace；wire permission 事件仍可校正
+				// 拉取失败保持默认 ask-on-dangerous；wire permission 事件仍可校正
 			});
 		// 队列初始快照（web 重连/切换会话后恢复展示）
 		void refreshInbox(currentId);
@@ -202,7 +202,7 @@ export function App() {
 		setDraft({
 			id: crypto.randomUUID(),
 			workspaceId,
-			permissionMode: "workspace",
+			permissionMode: "ask-on-dangerous",
 		});
 		setCurrentId(null);
 		setNotices([]);

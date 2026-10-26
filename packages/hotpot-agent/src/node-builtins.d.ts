@@ -167,6 +167,9 @@ declare module "node:url" {
 
 declare module "node:crypto" {
 	export function randomUUID(): string;
+	export function randomBytes(size: number): {
+		toString(encoding: "base64url"): string;
+	};
 }
 
 // cli 的行式输入：line/close 覆盖行式读取；SIGINT 覆盖 TTY raw 模式下的 ^C

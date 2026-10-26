@@ -25,8 +25,8 @@ export interface TodoItem {
 	status: "pending" | "in_progress" | "completed";
 }
 
-// M3 权限模式（core PermissionMode 的镜像）：readonly 读放行 / workspace 危险操作询问 / full 全放行
-export type PermissionMode = "readonly" | "workspace" | "full";
+// M3 权限模式（core PermissionMode 的镜像）：readonly 读放行 / ask-on-dangerous 危险操作询问 / full 全放行
+export type PermissionMode = "readonly" | "ask-on-dangerous" | "full";
 
 // POST /:id/uploads 响应：上传后的绝对路径（消息内以 @<path> 引用）
 export interface UploadResponse {

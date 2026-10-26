@@ -22,6 +22,8 @@ pnpm --filter @hotpot/web dev    # 开发服务器（/api 代理到 http://local
 pnpm --filter @hotpot/web build  # 产物输出到 packages/web/dist
 ```
 
+Vite 与 4573 后端是不同 origin，不共享 sessionStorage。开发时需把后端终端打印的同一 token 拼到 Vite 页面地址（如 `http://localhost:5173/?token=...`）；页面会将 token 存入当前 origin 的会话存储并清理地址栏，随后 REST 使用 Bearer、SSE 使用 `access_token`。
+
 ## 静态资产
 
 `vite.config.ts` 的 `publicDir` 指向仓库根 `public/`：logo 与各 agent 形象图（`logo.png`、`main_agent.png`、`work_agent*.webp`、`task_agent*.webp`）不搬迁、直接复用，构建时复制进 `dist/`。

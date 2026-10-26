@@ -3,6 +3,7 @@
 // web 为复合入口：先构建 Web 产物，再启动 server，端口就绪后自动打开浏览器。
 // 例：pnpm dev cli chat / pnpm dev web
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 
 const [pkg, ...args] = process.argv.slice(2);
@@ -15,6 +16,9 @@ if (!pkg || !/^[a-z][a-z0-9-]*$/.test(pkg)) {
 }
 
 const isWeb = pkg === "web";
+const apiToken = isWeb
+	? process.env.HOTPOT_API_TOKEN || randomBytes(32).toString("base64url")
+	: undefined;
 const entry = isWeb
 	? "packages/server/src/bin.ts"
 	: `packages/${pkg}/src/bin.ts`;
@@ -89,11 +93,19 @@ if (isWeb) {
 const child = spawn("tsx", [entry, ...args], {
 	stdio: "inherit",
 	shell: process.platform === "win32",
+	env: {
+		...process.env,
+		...(apiToken === undefined ? {} : { HOTPOT_API_TOKEN: apiToken }),
+	},
 });
 
-if (isWeb) {
+if (isWeb && apiToken !== undefined) {
 	const port = Number(process.env.HOTPOT_PORT ?? 4573);
-	void openWhenReady(`http://localhost:${port}`, () => child.exitCode !== null);
+	const token = encodeURIComponent(apiToken);
+	void openWhenReady(
+		`http://localhost:${port}?token=${token}`,
+		() => child.exitCode !== null,
+	);
 }
 
 child.on("exit", (code) => {

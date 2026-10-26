@@ -4,6 +4,9 @@ import { startServer } from "./serve.ts";
 
 startServer({
 	onListening: (info) => {
-		console.log(`hotpot-server listening on http://localhost:${info.port}`);
+		const token = encodeURIComponent(info.apiToken);
+		console.log(
+			`hotpot-server listening on http://${info.hostname}:${info.port}?token=${token}`,
+		);
 	},
 });

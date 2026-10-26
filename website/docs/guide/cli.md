@@ -27,7 +27,7 @@ worker / task 的内部事件不透出主流，其结果经 `spawn_workers` 的 
 
 ## 审批交互
 
-- **工具审批**：高危命令与覆盖写会询问 `y/n`，默认 `n`（fail-closed）。策略由 `approval.policy` 控制，见[配置](/guide/configuration)。
+- **工具审批**：高危命令与覆盖写会询问 `y/n`，默认 `n`（fail-closed）。CLI 从用户级 `permission.mode` 读取权限档位，见[配置](/guide/configuration)。
 - **plan 审批**：复杂任务首轮产出计划，打印全文后：
   - `y` 批准执行
   - `n` 拒绝

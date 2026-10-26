@@ -1,10 +1,10 @@
-// 权限三档（readonly/workspace/full）的审批行为测试（M1）：
+// 权限三档（readonly/ask-on-dangerous/full）的审批行为测试（M1）：
 // 装配方式镜像 server session-manager 与 cli chat.ts：createPermissionModeDecorator(holder)
 // 总是设为 decorateWorkerTool，execute 时按 holder.mode 动态分派；审批链头部经
 // createPermissionModeChainHead 动态裁决（执行时读 holder：full 放行、其余委托询问）。驱动方式与 run-worker 同款：createRuntime + scriptedAdapter，
 // 下层 turn 经 runAgentInline（worker 走 createWorkerRegistry，装饰器作用于四件套）。
 // - readonly：非 read 工具逐个预审批（新文件写入这种非危险操作也询问）
-// - workspace：非危险写不询问；危险 bash 询问，deny 则不执行
+// - ask-on-dangerous：非危险写不询问；危险 bash 询问，deny 则不执行
 // - full：危险 bash 也无人可问（链头直接 allow），真实执行
 // - 动态分派：装配后改写 holder.mode，后续执行的工具按新模式走
 
@@ -182,9 +182,9 @@ describe("permission mode 三档审批行为", () => {
 		expect(asks[1]?.summary).toContain("rm -rf");
 	});
 
-	it("workspace：新文件写入不询问、直接执行", async () => {
+	it("ask-on-dangerous：新文件写入不询问、直接执行", async () => {
 		const asks: RecordedApproval[] = [];
-		const holder: { mode: PermissionMode } = { mode: "workspace" };
+		const holder: { mode: PermissionMode } = { mode: "ask-on-dangerous" };
 		const runtime = await makeRuntime({
 			adapter: scriptedAdapter([
 				toolCallRound(
@@ -210,11 +210,11 @@ describe("permission mode 三档审批行为", () => {
 		expect(asks).toHaveLength(0);
 	});
 
-	it("workspace：危险 bash 询问，deny 则不执行（内建危险判定唯一询问来源）", async () => {
-		const target = join(proj, "workspace-target");
+	it("ask-on-dangerous：危险 bash 询问，deny 则不执行（内建危险判定唯一询问来源）", async () => {
+		const target = join(proj, "ask-on-dangerous-target");
 		await mkdir(target);
 		const asks: RecordedApproval[] = [];
-		const holder: { mode: PermissionMode } = { mode: "workspace" };
+		const holder: { mode: PermissionMode } = { mode: "ask-on-dangerous" };
 		const runtime = await makeRuntime({
 			adapter: scriptedAdapter([
 				toolCallRound(
@@ -284,7 +284,7 @@ describe("permission mode 三档审批行为", () => {
 		const asks: RecordedApproval[] = [];
 		const holder: { mode: PermissionMode } = { mode: "readonly" };
 		// 一个适配器按全局调用序回放 4 轮：turn-1 写 a.txt（readonly 预审批），
-		// 运行期翻成 workspace 后 turn-2 写 b.txt（不再询问）
+		// 运行期翻成 ask-on-dangerous 后 turn-2 写 b.txt（不再询问）
 		const runtime = await makeRuntime({
 			adapter: scriptedAdapter([
 				toolCallRound(
@@ -309,8 +309,8 @@ describe("permission mode 三档审批行为", () => {
 		expect(await readFile(join(proj, "a.txt"), "utf8")).toBe("a");
 
 		// 运行期切换（M2 端点的语义）：holder 即 runtime.permissionMode 持有的对象
-		holder.mode = "workspace";
-		expect(runtime.permissionMode.mode).toBe("workspace");
+		holder.mode = "ask-on-dangerous";
+		expect(runtime.permissionMode.mode).toBe("ask-on-dangerous");
 		await runAgentInline(runtime, "worker-2", "worker", "low", SIGNAL);
 		expect(asks).toHaveLength(1);
 		expect(await readFile(join(proj, "b.txt"), "utf8")).toBe("b");
@@ -318,8 +318,8 @@ describe("permission mode 三档审批行为", () => {
 });
 
 describe("createPermissionModeChainHead 动态链头（M2 修订）", () => {
-	it("执行时读 holder：workspace 委托询问、full 直接放行、切回继续询问", async () => {
-		const holder: { mode: PermissionMode } = { mode: "workspace" };
+	it("执行时读 holder：ask-on-dangerous 委托询问、full 直接放行、切回继续询问", async () => {
+		const holder: { mode: PermissionMode } = { mode: "ask-on-dangerous" };
 		const asks: string[] = [];
 		const chain = new ApprovalChain();
 		chain.use(
@@ -329,7 +329,7 @@ describe("createPermissionModeChainHead 动态链头（M2 修订）", () => {
 			}),
 		);
 		const req = { kind: "command", summary: "s", detail: "d" } as const;
-		// workspace：委托询问 handler（此处恒 deny，验证真的走到了询问）
+		// ask-on-dangerous：委托询问 handler（此处恒 deny，验证真的走到了询问）
 		expect(await chain.ask(req)).toBe("deny");
 		expect(asks).toHaveLength(1);
 		// 运行期切 full：同一 chain 直接 allow，询问 handler 不再被调

@@ -1,6 +1,6 @@
 // 会话管理器集成测试：turn 串行化、审批桥（parked promise）、seq/订阅广播、usage 统计。
 // 全部 scriptedAdapter 不触网；settings 用 mkdtemp home 下的三档夹具（provider 为不存在的
-// 测试值，resolveModel 兜底告警但 llm 注入模式下不真正解析）。审批场景用 workspace，
+// 测试值，resolveModel 兜底告警但 llm 注入模式下不真正解析）。审批场景用 ask-on-dangerous，
 // 无审批场景用 permission.mode:"full" 且脚本不触发需要审批的工具。
 
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -266,7 +266,7 @@ describe("createSessionManager", () => {
 	});
 
 	it("bash 高危命令：sink 收到 approval；未应答期间 turn 不结束；allow 后收到 log(approval/asked→decided) 与 turn(end)", async () => {
-		await writeSettings("workspace");
+		await writeSettings("ask-on-dangerous");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("清理临时目录 x"),
 			toolCallRound("bash", "w-tc-1", '{"command":"rm -rf x"}'),
@@ -320,7 +320,7 @@ describe("createSessionManager", () => {
 	});
 
 	it("complex：plan(drafted) → answerPlan approve → plan(approved) → 执行 turn 完成", async () => {
-		await writeSettings("workspace");
+		await writeSettings("ask-on-dangerous");
 		const planV1 = `# Plan
 
 ## Steps
@@ -450,7 +450,7 @@ tests pass
 	});
 
 	it("运行中 send：进入 next-turn 排队并落 inbox/spliced，回合结束后作为 follow-up 回合执行", async () => {
-		await writeSettings("workspace");
+		await writeSettings("ask-on-dangerous");
 		const adapter = scriptedAdapter([
 			spawnSimpleRound("删除临时目录 y"),
 			toolCallRound("bash", "w-tc-1", '{"command":"rm -rf y"}'),
@@ -639,13 +639,13 @@ tests pass
 
 describe("M2 权限与内置指令", () => {
 	it("setPermission：改写运行时持有者、落 permission/changed、瞬态 permission 事件在 durable log 之后广播", async () => {
-		await writeSettings("workspace");
+		await writeSettings("ask-on-dangerous");
 		const sm = createSessionManager({
 			home,
 			llm: { adapter: scriptedAdapter([]), model: MODEL },
 		});
 		const rec = await sm.create(proj);
-		expect(sm.permission(rec.id)).toBe("workspace");
+		expect(sm.permission(rec.id)).toBe("ask-on-dangerous");
 		const { events, sink } = makeSink();
 		sm.subscribe(rec.id, null, sink);
 
@@ -679,14 +679,14 @@ describe("M2 权限与内置指令", () => {
 		});
 		const rec = await sm.create(proj);
 		await sm.setPermission(rec.id, "readonly");
-		await sm.setPermission(rec.id, "workspace");
+		await sm.setPermission(rec.id, "ask-on-dangerous");
 		await sm.close(rec.id);
 
-		// 新 manager 恢复（settings 是 full，最后用户切换是 workspace，应以 fold 为准）
+		// 新 manager 恢复（settings 是 full，最后用户切换是 ask-on-dangerous，应以 fold 为准）
 		const sm2 = createSessionManager({ home });
 		const attached = await sm2.attachById(rec.id);
 		if (attached === null) throw new Error("attachById 未命中");
-		expect(sm2.permission(attached.id)).toBe("workspace");
+		expect(sm2.permission(attached.id)).toBe("ask-on-dangerous");
 		await sm2.close(attached.id);
 
 		// 无 permission/changed 记录的会话：回退 settings 默认
@@ -794,7 +794,7 @@ describe("M2 权限与内置指令", () => {
 			SessionApiError,
 		);
 		await expect(sm.send(rec.id, "/permission bogus")).rejects.toThrow(
-			/readonly, workspace, full/,
+			/readonly, ask-on-dangerous, full/,
 		);
 		await sm.close(rec.id);
 	});

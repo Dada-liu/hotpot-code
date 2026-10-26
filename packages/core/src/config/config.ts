@@ -2,8 +2,8 @@
 // 用户级 <home>/settings.json 必填（含 models 与凭证）；home 解析复用 session/store.ts 的 resolveHome
 // （参数 > HOTPOT_HOME > ~/.hotpot），避免两处规则漂移。项目级自 cwd 向上逐级查找
 // .hotpot/settings.json，可选（找不到则跳过）；用收窄 schema 只解析白名单字段
-// （mainAgentTier/maxParallelTasks/planMaxRevisions/permission.mode），未知字段（含 models）静默剥离，
-// 凭证永远只来自用户级，规避恶意仓库借 baseUrl 重定向窃取凭证。
+// （mainAgentTier/maxParallelTasks/planMaxRevisions），未知字段（含 models/permission）静默剥离，
+// 凭证与权限永远只来自用户级，规避恶意仓库窃取凭证或提升工具执行权限。
 // $ENV 插值：仅对用户级 apiKey 做；apiKey 整串形如 "$NAME" 时取环境变量；未设置（或为空）直接抛错并带变量名——
 // 静默传空 key 会把配置错误推迟成难以排查的远端 401（Review Focus 4）
 
@@ -92,9 +92,9 @@ const telemetrySchema = z.object({
 
 // 权限三档（M1 定案，替代旧 approval.policy）：
 // - readonly：read 类自动放行，其余一切 worker 工具逐个经用户审批
-// - workspace：仅危险操作询问（默认档）
+// - ask-on-dangerous：仅危险操作询问（默认档）
 // - full：全部自动放行（链头 allowAllHandler），永不打断用户
-const PERMISSION_MODES = ["readonly", "workspace", "full"] as const;
+const PERMISSION_MODES = ["readonly", "ask-on-dangerous", "full"] as const;
 const permissionSchema = z.object({
 	mode: z.enum(PERMISSION_MODES).optional(),
 });
@@ -124,7 +124,6 @@ const projectSettingsSchema = z.object({
 	mainAgentTier: z.enum(["high", "medium", "low"]).optional(),
 	maxParallelTasks: z.number().int().positive().optional(),
 	planMaxRevisions: z.number().int().positive().optional(),
-	permission: permissionSchema.optional(),
 });
 
 export type ModelRef = z.infer<typeof modelRefSchema>;
@@ -231,16 +230,9 @@ function findProjectSettingsPath(cwd: string): string | null {
 	}
 }
 
-// 合并：用户级为底，项目级白名单字段覆盖；permission 单独合并，空 permission 不抹掉用户级 mode
+// 合并：用户级为底，项目级白名单字段覆盖；permission 不在项目 schema 中，始终保留用户级值
 function mergeSettings(user: Settings, project: ProjectSettings): Settings {
-	return {
-		...user,
-		...project,
-		permission:
-			project.permission === undefined
-				? user.permission
-				: { ...user.permission, ...project.permission },
-	};
+	return { ...user, ...project };
 }
 
 // 同步读取 + 双层合并 + 插值；任何失败都抛出含文件路径与具体原因的错误

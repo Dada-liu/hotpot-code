@@ -585,7 +585,7 @@ describe("HTTP API", () => {
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"workspace",
+			"ask-on-dangerous",
 		);
 		const { id } = await createSession(fx, fx.proj);
 		const sse = await openSse(fx.base, id);
@@ -670,7 +670,7 @@ tests pass
 				textRound("auth 路由已完成。", { input: 500, output: 100 }),
 				textRound("用户认证已按计划实现。", { input: 100, output: 20 }),
 			]),
-			"workspace",
+			"ask-on-dangerous",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -892,7 +892,7 @@ tests pass
 				},
 				{
 					name: "permission",
-					description: "查看或切换权限模式（readonly|workspace|full）",
+					description: "查看或切换权限模式（readonly|ask-on-dangerous|full）",
 					builtin: true,
 				},
 				{ name: "commit", description: "Commit helper", builtin: false },
@@ -972,7 +972,7 @@ tests pass
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"workspace",
+			"ask-on-dangerous",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -1041,7 +1041,7 @@ tests pass
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"workspace",
+			"ask-on-dangerous",
 		);
 		const { id } = await createSession(fx, fx.proj);
 
@@ -1087,25 +1087,25 @@ tests pass
 // ---- M2：权限/队列/上传/fs 端点、内置指令、cwd 校验 ----
 
 describe("M2 endpoints", () => {
-	it("权限端点：GET 默认 workspace → PUT full 生效；SSE 收 permission 事件（durable log 在前）；落 permission/changed；attach 恢复还原用户档位", async () => {
+	it("权限端点：GET 默认 ask-on-dangerous → PUT full 生效；SSE 收 permission 事件（durable log 在前）；落 permission/changed；attach 恢复还原用户档位", async () => {
 		const fx = await startApi(scriptedAdapter([]));
 		const { id } = await createSession(fx, fx.proj);
 
-		// 详情带初始档位；GET /permission 默认 workspace（settings 未配 permission）
+		// 详情带初始档位；GET /permission 默认 ask-on-dangerous（settings 未配 permission）
 		const detail0 = (await (
 			await fetch(`${fx.base}/api/sessions/${id}`)
 		).json()) as { permissionMode: string };
-		expect(detail0.permissionMode).toBe("workspace");
+		expect(detail0.permissionMode).toBe("ask-on-dangerous");
 		const get0 = (await (
 			await fetch(`${fx.base}/api/sessions/${id}/permission`)
 		).json()) as { mode: string };
-		expect(get0).toEqual({ mode: "workspace" });
+		expect(get0).toEqual({ mode: "ask-on-dangerous" });
 
-		// 非法 body → 400；未知会话 GET/PUT → 404
+		// 旧 workspace 值 → 400；未知会话 GET/PUT → 404
 		const badPut = await fetch(`${fx.base}/api/sessions/${id}/permission`, {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ mode: "bogus" }),
+			body: JSON.stringify({ mode: "workspace" }),
 		});
 		expect(badPut.status).toBe(400);
 		expect(
@@ -1163,7 +1163,7 @@ describe("M2 endpoints", () => {
 		).toBe(true);
 
 		// 恢复：本 manager 摘托管后，新 manager attachById 经 fold 还原 "full"
-		//（settings 默认 workspace，还原值以用户切换为准）
+		//（settings 默认 ask-on-dangerous，还原值以用户切换为准）
 		await fx.manager.close(id);
 		const sm2 = createSessionManager({
 			home: fx.home,
@@ -1183,7 +1183,7 @@ describe("M2 endpoints", () => {
 				textRound("清理完成。", { input: 50, output: 10 }),
 				textRound("临时目录已清理。", { input: 20, output: 5 }),
 			]),
-			"workspace",
+			"ask-on-dangerous",
 		);
 		// 种子会话：磁盘日志预置 next-turn 全量快照（等价上次进程排队落盘），
 		// HTTP attach 时 foldInbox 播种进内存队列
@@ -1454,13 +1454,13 @@ describe("M2 endpoints", () => {
 		const { events: fileEvents } = await loadSession(detail.filePath);
 		expect(fileEvents.map((e) => e.type)).toEqual(["meta"]);
 
-		// /permission 裸：报当前档（默认 workspace）
+		// /permission 裸：报当前档（默认 ask-on-dangerous）
 		const bareRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
 			content: "/permission",
 		});
 		expect(bareRes.status).toBe(200);
 		const bareBody = (await bareRes.json()) as { reply: string };
-		expect(bareBody.reply).toContain("workspace");
+		expect(bareBody.reply).toContain("ask-on-dangerous");
 
 		// /permission readonly：切换 + 应答确认；GET 反映新档
 		const switchRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
@@ -1474,13 +1474,13 @@ describe("M2 endpoints", () => {
 		).json()) as { mode: string };
 		expect(getRes.mode).toBe("readonly");
 
-		// /permission bogus：400 列出有效值，消息不进回合
+		// /permission 旧 workspace 值：400 列出有效值，消息不进回合
 		const bogusRes = await postJson(`${fx.base}/api/sessions/${id}/messages`, {
-			content: "/permission bogus",
+			content: "/permission workspace",
 		});
 		expect(bogusRes.status).toBe(400);
 		const bogusBody = (await bogusRes.json()) as { error: string };
-		expect(bogusBody.error).toContain("readonly, workspace, full");
+		expect(bogusBody.error).toContain("readonly, ask-on-dangerous, full");
 	}, 20000);
 });
 
@@ -1685,7 +1685,7 @@ describe("工作区与目录选择器", () => {
 	}, 20000);
 
 	it("草稿创建：permissionMode 随会话生效，workspaceId=null 跳过自动归属", async () => {
-		const fx = await startApi(scriptedAdapter([]), "workspace");
+		const fx = await startApi(scriptedAdapter([]), "ask-on-dangerous");
 		const { workspace } = await createWorkspace(fx.base, fx.proj);
 
 		// permissionMode 随创建写入：holder 反映 + 日志落 permission/changed
@@ -1799,7 +1799,7 @@ describe("工作区与目录选择器", () => {
 });
 
 describe("settings 路由", () => {
-	it("GET 返回 models 与 mainAgentTier，$ENV 引用原文不插值", async () => {
+	it("GET 返回 models 与 mainAgentTier，所有 apiKey 均掩码且不泄露原文", async () => {
 		const fx = await startApi(scriptedAdapter([]));
 		// 覆盖写：apiKey 用 $ENV 引用 + mainAgentTier
 		await writeFile(
@@ -1822,12 +1822,17 @@ describe("settings 路由", () => {
 
 		const res = await fetch(`${fx.base}/api/settings`);
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as {
+		const responseText = await res.text();
+		const body = JSON.parse(responseText) as {
 			models: Record<string, { apiKey: string; baseUrl?: string }>;
 			mainAgentTier?: string;
 		};
-		// $ENV 引用原样返回（编辑器要看到引用文本，不做插值）
-		expect(body.models.high?.apiKey).toBe("$OPENAI_API_KEY");
+		expect(body.models.high?.apiKey).toBe("********");
+		expect(body.models.medium?.apiKey).toBe("********");
+		expect(body.models.low?.apiKey).toBe("********");
+		expect(responseText).not.toContain("OPENAI_API_KEY");
+		expect(responseText).not.toContain("mk");
+		expect(responseText).not.toContain("lk");
 		expect(body.models.high?.baseUrl).toBe("https://api.openai.com/v1");
 		expect(body.mainAgentTier).toBe("medium");
 	});
@@ -1864,25 +1869,47 @@ describe("settings 路由", () => {
 		});
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as {
-			models: { high: { model: string } };
+			models: { high: { model: string; apiKey: string } };
 			mainAgentTier: string;
 		};
 		expect(body.models.high.model).toBe("gpt-5");
+		expect(body.models.high.apiKey).toBe("********");
 		expect(body.mainAgentTier).toBe("low");
 
 		// 文件级校验：未触及的键保留、写入是合法 JSON
 		const raw = JSON.parse(
 			await readFile(join(fx.home, "settings.json"), "utf8"),
 		) as {
-			models: { high: { apiKey: string } };
+			models: Record<string, { apiKey: string }>;
 			mainAgentTier: string;
 			maxParallelTasks: number;
 			features: { webSearch: boolean };
 		};
-		expect(raw.models.high.apiKey).toBe("sk-new");
+		expect(raw.models.high?.apiKey).toBe("sk-new");
+		expect(raw.models.medium?.apiKey).toBe("mk");
+		expect(raw.models.low?.apiKey).toBe("lk");
 		expect(raw.mainAgentTier).toBe("low");
 		expect(raw.maxParallelTasks).toBe(6);
 		expect(raw.features.webSearch).toBe(false);
+
+		const maskedResponse = await fetch(`${fx.base}/api/settings`);
+		const maskedSettings = await maskedResponse.json();
+		const preservedResponse = await fetch(`${fx.base}/api/settings`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(maskedSettings),
+		});
+		expect(preservedResponse.status).toBe(200);
+		const preservedText = await preservedResponse.text();
+		expect(preservedText).not.toContain("sk-new");
+		expect(preservedText).not.toContain("mk");
+		expect(preservedText).not.toContain("lk");
+		const preservedRaw = JSON.parse(
+			await readFile(join(fx.home, "settings.json"), "utf8"),
+		) as { models: Record<string, { apiKey: string }> };
+		expect(preservedRaw.models.high?.apiKey).toBe("sk-new");
+		expect(preservedRaw.models.medium?.apiKey).toBe("mk");
+		expect(preservedRaw.models.low?.apiKey).toBe("lk");
 	});
 
 	it("PUT 非法 body → 400", async () => {

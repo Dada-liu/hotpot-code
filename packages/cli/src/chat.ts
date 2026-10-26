@@ -236,8 +236,8 @@ export async function runChat(opts: RunChatOptions): Promise<void> {
 	// 审计包装的 agentId 在装配期固定为 "main"：ApprovalChain.ask 不带 agentId，
 	// worker 发起的 command/write 询问也记在同一 id 下（core 包装层的既有契约）。
 	// full 模式链头由 createPermissionModeChainHead 动态裁决（执行时读 holder：
-	// full 任何询问直接放行，永不打断用户；其余模式委托终端 handler）。默认 workspace
-	const mode: PermissionMode = settings.permission?.mode ?? "workspace";
+	// full 任何询问直接放行，永不打断用户；其余模式委托终端 handler）。默认 ask-on-dangerous
+	const mode: PermissionMode = settings.permission?.mode ?? "ask-on-dangerous";
 	const permissionHolder: { mode: PermissionMode } = { mode };
 	const baseApproval = new ApprovalChain();
 	baseApproval.use(
@@ -252,7 +252,7 @@ export async function runChat(opts: RunChatOptions): Promise<void> {
 	});
 
 	// decorateWorkerTool 总是设置：包装在 execute 时读 holder.mode 动态分派——
-	// readonly 下 worker/task 的 bash/write/edit 逐个预审批；workspace/full 原样放行。
+	// readonly 下 worker/task 的 bash/write/edit 逐个预审批；ask-on-dangerous/full 原样放行。
 	// read 无副作用（isConcurrencySafe），任何模式下都不包、不询问。
 	// 下层注册表由编排层内部装配，包装只能经 runtime.decorateWorkerTool 闭包带进去
 	const decorateWorkerTool: WorkerToolDecorator =

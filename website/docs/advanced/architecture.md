@@ -56,14 +56,14 @@ cli / web
 
 | 包 | 职责 |
 |----|------|
-| `@hotpot/ai` | LLM 协议适配：api×provider 二维（anthropic-messages / openai-completions）、SSE 流式解析、模型目录、用量统计、结构化错误、指数退避重试 |
+| `@hotpot/ai` | LLM 协议适配：api×provider 二维（anthropic-messages / openai-completions）、SSE 流式解析、模型目录、用量统计、结构化错误 |
 | `@hotpot/core` | turn/step 两级循环、append-only JSONL 事件日志 + deriveMessages、系统提示词 section 注册表、工具与审批 waterfall、配置加载 |
 | `@hotpot/orchestrator` | 三层编排：MainAgent / WorkerAgent / TaskAgent、难度评估与模型档位路由、plan 生成与审批流、steer/queue 双队列、MCP 接入 |
 | `@hotpot/server` | REST + SSE：会话管理、审批桥、JSONL tailer 断线补发、静态托管 |
 | `@hotpot/web` | React SPA：会话列表、流式对话、工具卡片、plan 审查、队列与用量面板（纯前端，不依赖 node 包） |
 | `@hotpot/cli` | 行式交互入口：参数解析、终端渲染、审批交互 |
 | `@hotpot/telemetry` | 匿名遥测客户端：事件白名单、脱敏、批量上报 |
-| `@hotpot/benchmarks` | benchmark runner：SWE-bench 官方评测 + 自建三题 |
+| `@hotpot/benchmarks` | benchmark runner：SWE-bench 官方评测 + 自建题三类 |
 
 ## 工程原则
 

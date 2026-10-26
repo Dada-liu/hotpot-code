@@ -3,6 +3,7 @@
 // 因此客户端不需要自己拼 ?after=。连接状态经 onState 回调透出，
 // 用于顶栏「连接断开，重连中…」横幅。
 
+import { withApiToken } from "./auth.ts";
 import type { WireEvent } from "./protocol.ts";
 
 export type ConnectionState = "open" | "reconnecting";
@@ -17,7 +18,7 @@ export function connect(
 	onState?: (state: ConnectionState) => void,
 ): EventConnection {
 	const source = new EventSource(
-		`/api/sessions/${encodeURIComponent(sessionId)}/events`,
+		withApiToken(`/api/sessions/${encodeURIComponent(sessionId)}/events`),
 	);
 	source.onopen = () => {
 		onState?.("open");

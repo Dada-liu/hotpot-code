@@ -1,6 +1,6 @@
 # @hotpot/server
 
-M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会话管理、事件推送与断线重连（重连时从 JSONL 日志按 offset 补发 missed 事件）。依赖方向 `server → orchestrator → core → ai`；遥测经 `@hotpot/telemetry` 旁路上报（`server → telemetry → core`）。
+M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会话管理、事件推送与断线重连（重连时按 seq 从 wire ring buffer 增量补发，掉出留存窗口后降级为 JSONL 全量重放）。依赖方向 `server → orchestrator → core → ai`；遥测经 `@hotpot/telemetry` 旁路上报（`server → telemetry → core`）。
 
 ## 当前已实现
 
@@ -8,9 +8,9 @@ M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会�
   - `start()` 先补读历史（`fromOffset`，默认 0）整批回调，再进入跟随模式；
   - 跟随：`fs.watch` 触发增量读 + `pollIntervalMs`（默认 250）轮询文件大小兜底；
   - 只读新增字节：空行与 `JSON.parse` 失败的坏行跳过；末尾无换行的半行留待下次拼接（写入中途被杀不掉数据）；
-  - `offset()` 返回已消费字节数（半行不算），客户端断线重连时携带它即可从 tailer 续读补发；
+  - `offset()` 返回已消费字节数（半行不算），tailer 调用方可把它作为新 tailer 的 `fromOffset` 续读；SSE 客户端重连不携带这个字节 offset，而是携带 wire `seq`；
   - `stop()` 清除 watch 与轮询；原地再 `start()` 从上次 offset 续读；`fs.watch` 报错自动降级为纯轮询，不抛给调用方。
-- **UI 事件协议与总线**（`src/wire.ts`）：`WireEvent` 六事件联合（`log`/`delta`/`turn`/`plan`/`spawn`/`approval`，全部带会话内单调 `seq`）；`createWireHub` 分配 seq 并留存 ring buffer（上限 2000，超出丢最旧），供订阅重放（`buffer()`）与断线增量（`tailAfter()`）。
+- **UI 事件协议与总线**（`src/wire.ts`）：`WireEvent` 七事件联合（`log`/`delta`/`turn`/`plan`/`spawn`/`approval`/`permission`，全部带会话内单调 `seq`）；`createWireHub` 分配 seq 并留存 ring buffer（上限 2000，超出丢最旧），供订阅重放（`buffer()`）与断线增量（`tailAfter()`）。
 - **审批桥**（`src/approvals.ts`）：`createApprovalBridge(notify)` 把审批询问转成「入 pending 表 → 广播 approval 事件 → 返回 parked promise」；`answer(requestId)` 按 id 应答，`answerPendingPlan` 应答唯一挂起的 plan 询问。
 - **usage 统计**（`src/usage.ts`）：`summarizeUsage(events)` 折叠 `assistant_msg.usage`，产出 total/byTier（含条数 count）/byAgent。
 - **会话管理器**（`src/session-manager.ts`）：`createSessionManager({home, llm?, warn?})`。
@@ -24,8 +24,9 @@ M3 服务层：在 cli 与 orchestrator 之上提供 REST + SSE API，负责会�
   - publicDir（默认 `<仓库根>/public`）：`/<文件名>` 原样直出；
   - 两个目录都不存在时不挂任何路由（纯 API 模式）；`/api` 前缀永不进静态路由，URL 路径规范化后拒绝逃逸根目录。
 - **REST + SSE 路由**（`src/app.ts`）：全部路由挂 `/api/sessions*`；`GET /:id` 与 `events`（SSE）等单会话路由经共享的 `requireSession` 解析——内存 managed 表未命中时降级 `attachById` 恢复磁盘会话（CLI 创建的会话同样可打开），attach 也未命中才 404。`DELETE /:id` 删除会话：运行中 409（先取消再删）；删除 = close 收尾（拒决未决审批/停 tailer/摘 managed/关 MCP）+ 删磁盘日志，之后任何入口均 404。`POST /:id/archive` 归档会话：结束运行中的回合（abort + 拒决未决审批 + 不再消费队列）并等回合链落定（日志与遥测全部落盘）后摘托管；会话保留在磁盘列表中，可随时重新打开。
-- **`startServer` 启动装配**（`src/serve.ts`）：SessionManager + Hono app + 静态托管 + `@hono/node-server` 监听的可复用接线；`hotpot-server` bin 与发布包 `hotpot web` 共用。端口取参数或 `HOTPOT_PORT`（默认 4573），静态目录可用参数或 `HOTPOT_WEB_DIST`/`HOTPOT_PUBLIC_DIR` 覆盖。
-- **`hotpot-server` bin**（`src/bin.ts`）：调用 `startServer` 并打印启动地址，供源码仓库开发态使用。
+- **`startServer` 启动装配**（`src/serve.ts`）：SessionManager + Hono app + 静态托管 + `@hono/node-server` 监听的可复用接线；`hotpot-server` bin 与发布包 `hotpot web` 共用。默认仅监听 `127.0.0.1`，端口取参数或 `HOTPOT_PORT`（默认 4573），静态目录可用参数或 `HOTPOT_WEB_DIST`/`HOTPOT_PUBLIC_DIR` 覆盖。每次启动生成随机 API token，也可由非空 `HOTPOT_API_TOKEN` 固定；REST 使用 Bearer 认证，SSE events 使用 `access_token` 查询参数，静态资源无需认证。
+- **模型设置**（`src/settings-store.ts`）：`GET /api/settings` 只返回固定 apiKey 掩码，不返回字面值或 `$ENV` 引用；PUT 中仍为掩码的档位保留磁盘原密钥，其他非空值明确替换，其他设置字段不变。
+- **`hotpot-server` bin**（`src/bin.ts`）：调用 `startServer` 并打印带 `?token=` 的实际启动地址，供源码仓库开发态使用。
 
 ## M4 增量
 
@@ -64,11 +65,13 @@ src/
   approvals.ts         审批桥（pending 表 + parked promise）
   usage.ts             usage 折叠统计（summarizeUsage）
   session-manager.ts   会话管理器（createSessionManager）
+  settings-store.ts    模型设置读写（apiKey 掩码与安全保存）
   static.ts            静态托管（mountStatic：web 产物 + 根 public/）
   node-builtins.d.ts   Node 内置模块的最小 ambient 声明（禁 @types/node，超集自 core）
 test/
   tailer.test.ts              补读/坏行/半行/stop/offset 续读用例
   session-manager.test.ts     事件顺序/spawn/审批/plan/串行/attach/usage 集成用例
+  serve.test.ts               默认回环监听、REST/SSE 认证与静态免认证
   api.test.ts                 REST/SSE 集成用例（真实端口 + fetch + SSE 流式消费）
   directory-picker.test.ts    原生选择器平台分支/取消/回退/超时用例（假 spawn）
   static.test.ts              纯 API 模式/SPA 兜底/资产 MIME/public 直出用例

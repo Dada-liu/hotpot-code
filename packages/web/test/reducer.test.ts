@@ -996,9 +996,9 @@ describe("inbox 队列（M4）", () => {
 
 // M3：权限模式——wire permission 瞬态折叠档位；permission/changed 仅审计不渲染
 describe("reduce：权限模式（M3）", () => {
-	it("createInitialState 默认 workspace；wire permission 事件折叠档位", () => {
+	it("createInitialState 默认 ask-on-dangerous；wire permission 事件折叠档位", () => {
 		let state = createInitialState();
-		expect(state.permissionMode).toBe("workspace");
+		expect(state.permissionMode).toBe("ask-on-dangerous");
 
 		state = reduce(state, { seq: 1, kind: "permission", mode: "readonly" });
 		expect(state.permissionMode).toBe("readonly");

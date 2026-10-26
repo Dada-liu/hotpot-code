@@ -70,7 +70,7 @@
 | 9 | 用户记忆 | 跨会话记忆，启动时注入摘要 section，写记忆走独立工具 | — | ⏳ 未开始 |
 | 10 | 向量数据库 | 服务记忆与代码检索，独立 packages/memory | — | ⏳ 未开始 |
 | 11 | 后台任务 jobs | 后台 bash、子 agent 后台运行，完成时通知 | dsh | ⏳ 未开始 |
-| 12 | 权限预设 | sandbox/approval 旋钮打包成预设（safe / default / yolo） | dsh | ⏳ 未开始 |
+| 12 | 权限预设 | 三档审批预设：readonly / ask-on-dangerous / full | dsh | ✅ 已实现：`core/src/config/config.ts`、`orchestrator/src/runtime/runtime.ts`；验收 `core/test/config.test.ts`、`orchestrator/test/runtime.test.ts`、`server/test/api.test.ts` |
 | 13 | tool_search 延迟工具加载 | 工具多时先给目录、按需加载声明，省 token | pi | ⏳ 未开始 |
 | 14 | 沙箱 | 审批链上的执行器替换；本地 Seatbelt/容器 | — | ⏳ 未开始 |
 

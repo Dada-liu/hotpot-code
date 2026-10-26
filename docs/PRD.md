@@ -24,7 +24,7 @@
 
 ## 3. 架构决议
 
-- pnpm monorepo，Node >= 22 + TypeScript erasable-syntax-only（`.ts` 后缀 import，Node strip-only 开发直跑），vitest 测试，biome 检查，tsdown 发布
+- pnpm monorepo，Node >= 22 + TypeScript erasable-syntax-only（`.ts` 后缀 import，Node strip-only 开发直跑），vitest 测试，biome 检查，tsup 发布
 - 包结构：`packages/ai`（LLM 适配，api×provider 二维，首批 anthropic-messages + openai-completions）→ `packages/core`（turn/step 循环、工具、提示词、会话日志）→ `packages/orchestrator`（三层编排）→ `packages/server`（REST + SSE 服务层，实现见 [packages/server/README.md](../packages/server/README.md)）+ `packages/web`（React SPA，实现见 [packages/web/README.md](../packages/web/README.md)）（M3，已实现）、`packages/cli`（M1）、`packages/telemetry`（M5 匿名遥测客户端，实现见 [packages/telemetry/README.md](../packages/telemetry/README.md)）
 - **会话日志即唯一事实源**：append-only JSONL 事件日志，`deriveMessages()` 转换出模型历史；存储于 `~/.hotpot/sessions/`
 - 配置：双层——用户级 `~/.hotpot/settings.json`（三档模型 high/medium/low、`maxParallelTasks` 默认 10、`planMaxRevisions` 默认 3）+ 项目级 `./.hotpot/settings.json`（仅可覆盖非凭证字段；凭证只从用户级读取）
@@ -32,11 +32,11 @@
 
 ## 4. 功能需求
 
-### P0 基础功能（M1-M3）
-1. 基础 agentic loop（turn/step 两级循环、中断、上下文长度管理）
+### P0 基础功能（M1-M3，除特别注明外已实现）
+1. 基础 agentic loop（turn/step 两级循环与中断已实现；上下文长度管理未实现）
 2. 系统提示词（section 注册表，英文 prompt，分层组装）
 3. 四个基础工具：bash / read / write / edit（审批 waterfall，高危确认）
-4. LLM 适配器（流式、tool calling、用量统计、结构化错误、指数退避重试）
+4. LLM 适配器（流式、tool calling、用量统计、结构化错误已实现；模型请求的指数退避重试未实现）
 5. 三层 agent 编排：主 agent（对话入口，首轮提示词判定难度+模型档位路由，无独立路由工具）→ 从 agent（任务执行，可拆并行）→ 子 agent（原子任务，继承从 agent 档位）；复杂任务首轮直出计划、经用户审批后执行，简单任务首轮直接派发执行
 6. 原始会话全量存储（JSONL，可恢复续聊）
 7. Web 端（M3：会话列表、流式对话、工具可视化、plan 审查、用量展示）

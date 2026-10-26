@@ -9,9 +9,9 @@
 |----|------|------|
 | 语言/运行时 | Node >= 22 + TypeScript | PRD 要求；pi 与 dsh 均如此 |
 | TS 约束 | erasable-syntax-only，源码间用 `.ts` 后缀 import | AGENTS.md 硬性规则；pi 同款配置（`erasableSyntaxOnly` + `rewriteRelativeImportExtensions`） |
-| 开发期运行 | Node strip-only 直接跑 TS（可用 tsx） | pi/dsh 都是零编译开发体验，tsc/tsdown 只用于发布 |
+| 开发期运行 | Node strip-only 直接跑 TS（可用 tsx） | pi/dsh 都是零编译开发体验，tsc/tsup 只用于发布 |
 | 包管理 | pnpm monorepo | dsh 同款；多包共享类型 |
-| 构建发布 | tsdown（发布时才用） | 比逐包 `tsc -b` 简单，dsh 在用 |
+| 构建发布 | tsup（发布时才用） | 将 workspace 源码打成单文件 CLI，并复制 Web 产物 |
 | 测试 | vitest | pi/dsh 均使用 |
 | lint/format | biome | pi 在用，lint+format 一体（dsh 用 oxlint，功能重合，二选一即可） |
 | 工具 schema | zod | pi 用 typebox、dsh 用自研 DSL（过重）；zod 生态成熟，可转 JSON Schema |
@@ -46,7 +46,7 @@
 - **api × provider 二维适配**（借鉴 pi）：抽象轴是「协议」（anthropic-messages、openai-completions），provider = 协议 + baseUrl + 凭证的组合。M1 只实现这两个协议，即可覆盖 Anthropic / OpenAI / DeepSeek / Kimi 等
 - 统一接口：`streamChat(messages, tools, options) → AsyncIterable<StreamEvent>`
 - StreamEvent 类型：`block_start / text_delta / reasoning_delta / tool_call_delta / block_end / usage / finish(reason: stop|tool_calls|max_tokens|aborted|error)`（借鉴 dsh 的 StreamChunk 形状）
-- 结构化错误：统一错误类型含机器码、HTTP status、`retryAfter`；重试走指数退避
+- 结构化错误：统一错误类型含机器码、HTTP status、`retryAfter`；模型请求的指数退避重试尚未实现，`retryAfter` 目前只透传给上层
 - 模型元数据 catalog：`contextWindow`、`maxTokens`、`reasoning 档位`、`cost`；M1 手写少量模型常量即可，不做 pi 那种 40+ provider 的生成管线
 
 ### packages/core — agent 核心
@@ -125,7 +125,7 @@ packages/orchestrator/src/
 ├── registries/              # 角色工具注册表
 ├── runtime/                 # 编排运行时（spawn / resolveModel）
 ├── types/                   # 角色与编排事件类型
-└── tools/                   # delegate / spawn_workers / spawn_tasks / run-worker
+└── tools/                   # spawn_workers / spawn_tasks / run-worker
 ```
 
 ## 4. 关键数据流：一次用户消息
@@ -239,7 +239,7 @@ cli / server
 | mainAgentTier | high | 用户级+项目级 | 主 agent 默认档位 |
 | **maxParallelTasks** | **10** | 用户级+项目级 | 并行 TaskAgent 上限 |
 | **planMaxRevisions** | **3** | 用户级+项目级 | plan 审批修订轮次上限 |
-| approval.policy | ask-on-dangerous | 用户级+项目级 | 高危命令确认策略 |
+| permission.mode | ask-on-dangerous | 仅用户级 | 权限三档：readonly（read 类放行，其余 worker 工具逐个审批）/ ask-on-dangerous（危险操作询问）/ full（全部放行）；项目级 permission 会被忽略 |
 | features.* | 全开 | 仅用户级 | M4 功能开关：todo/hooks/skills/promptTemplates/webSearch/webFetch/mcp |
 | hooks | 无 | 仅用户级 | Claude Code 钩子格式（SessionStart/PreToolUse/PostToolUse/Stop） |
 | webSearch | duckduckgo | 仅用户级 | web_search 后端（duckduckgo 或 custom + baseUrl/apiKey/headers） |
@@ -247,11 +247,11 @@ cli / server
 | skillsDirs | [] | 仅用户级 | 额外 skill 扫描目录（相对 cwd） |
 | promptsDirs | [] | 仅用户级 | 额外 prompt template 扫描目录（相对 cwd） |
 | telemetry.enabled | true | 仅用户级 | 匿名遥测开关（M5.1） |
-| telemetry.endpoint | 未设置（源码常量为空） | 仅用户级 | 上报地址；settings 中的空串/纯空白表示「本机未配置」，回退到环境变量与源码常量（schema 不再要求非空）；解析顺序 settings > `HOTPOT_TELEMETRY_ENDPOINT` > 源码常量，空环境变量会遮挡源码常量，最终值为空或非 http(s) 时视为未启用 |
+| telemetry.endpoint | 源码内置已部署地址 | 仅用户级 | 上报地址；settings 中的空串/纯空白会回退到环境变量与源码常量；解析顺序 settings > `HOTPOT_TELEMETRY_ENDPOINT` > 源码常量，空环境变量会遮挡源码常量，最终值为空或非 http(s) 时视为未启用 |
 | telemetry.token | 无 | 仅用户级 | ingest 的 Bearer token，支持整串 `$ENV` 引用；默认时不带 Authorization 头 |
 | telemetry.flushIntervalMs | 30000 | 仅用户级 | 定时批量上报间隔（毫秒），非负整数，`0` 表示不定时 flush；负数仍是校验错误 |
 
-项目级可覆盖白名单：`mainAgentTier`、`maxParallelTasks`、`planMaxRevisions`、`approval.policy`；其余字段（含 models）一律忽略。凭证只从用户级读取，规避恶意仓库注入风险（M4 再考虑 pi 式 project trust 提示）。M4 新增字段（features/hooks/webSearch/mcpServers/skillsDirs/promptsDirs）一律仅用户级：hooks/mcpServers 涉及任意命令执行，项目级注入即 RCE；扫描目录与外发流量同理。M5 的 `telemetry` 同样仅用户级：endpoint/token 决定数据与凭证去向，项目级可写等于允许仓库劫持上报。
+项目级可覆盖白名单：`mainAgentTier`、`maxParallelTasks`、`planMaxRevisions`；其余字段（含 models 与 permission）一律忽略。凭证和权限只从用户级读取，规避恶意仓库注入或提权风险。M4 新增字段（features/hooks/webSearch/mcpServers/skillsDirs/promptsDirs）一律仅用户级：hooks/mcpServers 涉及任意命令执行，项目级注入即 RCE；扫描目录与外发流量同理。M5 的 `telemetry` 同样仅用户级：endpoint/token 决定数据与凭证去向，项目级可写等于允许仓库劫持上报。
 
 ## 7. 从 pi / dsh 借鉴的设计（汇总）
 
